@@ -1,4 +1,4 @@
-name: Reddit Stash Scraper (MEGA via rclone)
+name: Reddit Stash Scraper (MEGA)
 
 on:
   schedule:
@@ -16,24 +16,15 @@ jobs:
     timeout-minutes: 240
 
     steps:
-      - name: Checkout repository (with write permissions)
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: true
 
-      - name: Create semi-annual cache key
-        id: cache-key
-        run: |
-          year=$(date +'%Y')
-          month=$(date +'%-m')
-          half_year=$((month <= 6 ? 1 : 2))
-          echo "date=${year}-H${half_year}" >> $GITHUB_OUTPUT
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.12'
-          cache: 'pip'
+          python-version: "3.12"
+          cache: pip
           cache-dependency-path: requirements.txt
 
       - name: Install dependencies
@@ -41,16 +32,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Detect storage provider
-        id: storage
-        env:
-          STORAGE_PROVIDER: ${{ secrets.STORAGE_PROVIDER }}
+      - name: Install rclone
         run: |
-          if [ "${STORAGE_PROVIDER}" = "mega" ]; then
-            echo "provider=mega" >> $GITHUB_OUTPUT
-          else
-            echo "provider=dropbox" >> $GITHUB_OUTPUT
-          fi
+          curl https://rclone.org/install.sh | sudo bash
+
+      - name: Configure MEGA
+        env:
+          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
+          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
+        run: |
+          rclone config create mega mega \
+          user "$MEGA_EMAIL" \
+          pass "$MEGA_PASSWORD" \
+          --non-interactive
+
+      - name: Download previous archive from MEGA
+        run: |
+          mkdir -p reddit
+          rclone copy mega:reddit-archive reddit --progress || true
 
       - name: Run reddit_stash.py
         env:
@@ -62,13 +61,10 @@ jobs:
         run: |
           python reddit_stash.py
 
-      - name: Upload to MEGA via rclone
-        if: ${{ steps.storage.outputs.provider == 'mega' }}
-        env:
-          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
-          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
+      - name: Upload updated archive to MEGA
         run: |
-          set -e
-          curl https://rclone.org/install.sh | sudo bash
-          rclone config create mega mega user "$MEGA_EMAIL" pass "$MEGA_PASSWORD" --non-interactive || true
-          rclone copy "archive/" "mega:reddit-archive" --checksum --transfers 4 --checkers 8 --progress
+          rclone copy reddit mega:reddit-archive \
+          --checksum \
+          --transfers 4 \
+          --checkers 8 \
+          --progress
