@@ -1,11 +1,11 @@
-name: Reddit Stash Scraper (MEGA upload)
+name: Reddit Stash Scraper (MEGA via rclone)
 
 on:
   schedule:
-    # same schedule pattern as upstream
     - cron: "0 6-21/3 * * *"
     - cron: "0 23,3 * * *"
   workflow_dispatch:
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -13,15 +13,16 @@ concurrency:
 jobs:
   run-script:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repository (with write permissions)
         uses: actions/checkout@v4
-        timeout-minutes: 1
+        with:
+          persist-credentials: true
 
       - name: TruffleHog OSS (verify scripts) 
-        if: github.event_name != 'schedule'
+        if: ${{ github.event_name != 'schedule' }}
         uses: trufflesecurity/trufflehog@main
         with:
           extra_args: --only-verified
@@ -65,8 +66,8 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # install MEGA client for uploading
-          pip install mega.py==1.0.4
+          # do NOT install mega.py (pycrypto builds fail on the runner)
+          # rclone will be installed when needed below
 
       - name: Detect storage provider
         id: storage
@@ -80,11 +81,10 @@ jobs:
           else
             echo "provider=dropbox" >> $GITHUB_OUTPUT
           fi
-          echo "Using storage provider: $(cat $GITHUB_OUTPUT | grep provider | cut -d= -f2)"
 
       - name: (optional) Download from Dropbox
-        if: steps.storage.outputs.provider != 's3' && steps.storage.outputs.provider != 'mega'
-        timeout-minutes: 2
+        if: ${{ steps.storage.outputs.provider != 's3' && steps.storage.outputs.provider != 'mega' }}
+        timeout-minutes: 10
         env:
           DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
           DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
@@ -93,8 +93,8 @@ jobs:
           python dropbox_utils.py --download
 
       - name: (optional) Download from S3
-        if: steps.storage.outputs.provider == 's3'
-        timeout-minutes: 5
+        if: ${{ steps.storage.outputs.provider == 's3' }}
+        timeout-minutes: 10
         env:
           STORAGE_PROVIDER: s3
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -106,7 +106,7 @@ jobs:
           python storage_utils.py --download
 
       - name: Run reddit_stash.py (main processing)
-        timeout-minutes: 90
+        timeout-minutes: 120
         env:
           REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
@@ -119,98 +119,83 @@ jobs:
         run: |
           python reddit_stash.py
 
-      # -------------------------
-      # REPLACEMENT: Upload to MEGA
-      # -------------------------
-      - name: Upload to MEGA (organized by subreddit)
-        if: steps.storage.outputs.provider == 'mega'
-        timeout-minutes: 90
+      - name: Upload to MEGA via rclone (organized by subreddit)
+        if: ${{ steps.storage.outputs.provider == 'mega' }}
+        timeout-minutes: 150
         env:
           MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
           MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          echo "Installing rclone..."
+          curl https://rclone.org/install.sh | sudo bash
+
+          echo "Configuring rclone remote for MEGA..."
+          # create 'mega' remote non-interactively
+          rclone config create mega mega user "$MEGA_EMAIL" pass "$MEGA_PASSWORD" --non-interactive || true
+
+          echo "Copying archive/ to mega:reddit-archive ..."
+          rclone copy "archive/" "mega:reddit-archive" --checksum --transfers 4 --checkers 8 --progress || true
+
+          echo "Generating remote listing..."
+          rclone lsjson --recursive "mega:reddit-archive" > remote_list.json || true
+
+          echo "Mapping uploaded media to uploaded_mega.txt and committing..."
           python - <<'PY'
-          import os, sys, time, subprocess
-          from mega import Mega
+import json, os, subprocess
+ARCHIVE_ROOT = "archive"
+UPLOADED_FILE = "uploaded_mega.txt"
+media_exts = {".jpg",".jpeg",".png",".gif",".mp4",".webm",".mov",".mkv",".bmp",".webp"}
 
-          ARCHIVE_ROOT = "archive"   # same output as upstream reddit-stash
-          REMOTE_ROOT = "/reddit-archive"
-          UPLOADED_FILE = "uploaded_mega.txt"
+# Load remote listing if available
+remote_paths = set()
+if os.path.exists("remote_list.json"):
+    try:
+        with open("remote_list.json", "r", encoding="utf-8") as f:
+            remote = json.load(f)
+        for item in remote:
+            path = item.get("Path","")
+            if path and not path.endswith("/"):
+                remote_paths.add(path)
+    except Exception as e:
+        print("Warning: could not parse remote_list.json:", e)
 
-          # load uploaded set if present
-          uploaded = set()
-          if os.path.exists(UPLOADED_FILE):
-              with open(UPLOADED_FILE, "r", encoding="utf-8") as f:
-                  uploaded.update(l.strip() for l in f if l.strip())
+uploaded_now = []
+for root, dirs, files in os.walk(ARCHIVE_ROOT):
+    for fn in files:
+        ext = os.path.splitext(fn)[1].lower()
+        if ext in media_exts:
+            rel = os.path.relpath(os.path.join(root, fn), ARCHIVE_ROOT).replace(os.sep, "/")
+            if rel in remote_paths:
+                uploaded_now.append(rel)
 
-          # find media files (same extensions as typical)
-          media_exts = {".jpg",".jpeg",".png",".gif",".mp4",".webm",".mov",".mkv"}
-          candidates = []
-          for root, dirs, files in os.walk(ARCHIVE_ROOT):
-              for fn in files:
-                  ext = os.path.splitext(fn)[1].lower()
-                  if ext in media_exts:
-                      full = os.path.join(root, fn)
-                      rel = os.path.relpath(full, ARCHIVE_ROOT)
-                      candidates.append((full, rel))
-          candidates.sort()
+if uploaded_now:
+    if os.path.exists(UPLOADED_FILE):
+        with open(UPLOADED_FILE, "r", encoding="utf-8") as f:
+            existing = set(l.strip() for l in f if l.strip())
+    else:
+        existing = set()
+    new = [p for p in uploaded_now if p not in existing]
+    if new:
+        with open(UPLOADED_FILE, "a", encoding="utf-8") as f:
+            for p in new:
+                f.write(p + "\n")
+        try:
+            subprocess.run(['git', 'config', 'user.name', 'github-actions'], check=True)
+            subprocess.run(['git', 'config', 'user.email', 'actions@github.com'], check=True)
+            subprocess.run(['git', 'add', UPLOADED_FILE], check=True)
+            subprocess.run(['git', 'commit', '-m', 'chore: update uploaded_mega.txt (rclone)'], check=True)
+            subprocess.run(['git', 'push'], check=True)
+            print("Persisted uploaded_mega.txt to repo.")
+        except Exception as e:
+            print("Warning: could not push uploaded_mega.txt:", e)
+else:
+    print("No new uploaded media found on remote.")
+PY
 
-          if not candidates:
-              print("No media files found.")
-              sys.exit(0)
-
-          print(f"Total media files found: {len(candidates)}. Already uploaded: {len(uploaded)}")
-
-          mega = Mega()
-          try:
-              m = mega.login(os.environ.get("MEGA_EMAIL"), os.environ.get("MEGA_PASSWORD"))
-          except Exception as e:
-              print("MEGA login failed:", e)
-              sys.exit(2)
-
-          def find_subreddit(rel):
-              parts = rel.split(os.sep)
-              for p in parts:
-                  if p.startswith("r_"):
-                      return p[2:]
-              return "misc"
-
-          uploaded_now = []
-          for full, rel in candidates:
-              if rel in uploaded:
-                  print("Skipping (already uploaded):", rel)
-                  continue
-              sub = find_subreddit(rel)
-              remote_dir = REMOTE_ROOT + "/" + sub
-              print("Uploading", rel, "to", remote_dir)
-              try:
-                  m.upload(full, remote_dir)
-                  uploaded_now.append(rel)
-              except Exception as e:
-                  print("Error uploading", rel, e)
-                  time.sleep(2)
-
-          if uploaded_now:
-              with open(UPLOADED_FILE, "a", encoding="utf-8") as f:
-                  for p in uploaded_now:
-                      f.write(p + "\n")
-              # commit uploaded_mega.txt back to repo (persist state)
-              try:
-                  subprocess.run(['git', 'config', 'user.name', 'github-actions'], check=True)
-                  subprocess.run(['git', 'config', 'user.email', 'actions@github.com'], check=True)
-                  subprocess.run(['git', 'add', UPLOADED_FILE], check=True)
-                  subprocess.run(['git', 'commit', '-m', 'chore: update uploaded_mega.txt (mega)'], check=True)
-                  subprocess.run(['git', 'push'], check=True)
-                  print("Persisted uploaded_mega.txt to repo.")
-              except Exception as e:
-                  print("Warning: could not push uploaded_mega.txt:", e)
-          else:
-              print("No new uploads.")
-          PY
-
-      # --- (optional) Upload to Dropbox (kept for parity but will only run if storage provider != mega && != s3)
       - name: Upload to Dropbox (original behavior)
-        if: steps.storage.outputs.provider != 's3' && steps.storage.outputs.provider != 'mega'
+        if: ${{ steps.storage.outputs.provider != 's3' && steps.storage.outputs.provider != 'mega' }}
         timeout-minutes: 50
         env:
           DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
@@ -219,9 +204,8 @@ jobs:
         run: |
           python dropbox_utils.py --upload
 
-      # --- S3 upload kept for parity ---
       - name: Upload to S3 (original behavior)
-        if: steps.storage.outputs.provider == 's3'
+        if: ${{ steps.storage.outputs.provider == 's3' }}
         timeout-minutes: 50
         env:
           STORAGE_PROVIDER: s3
@@ -232,3 +216,10 @@ jobs:
           S3_STORAGE_CLASS: ${{ secrets.S3_STORAGE_CLASS }}
         run: |
           python storage_utils.py --upload
+
+      - name: Upload metadata artifact (backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: reddit-archive-metadata
+          path: archive
+          retention-days: 90
