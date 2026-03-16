@@ -123,7 +123,7 @@ jobs:
       # REPLACEMENT: Upload to MEGA
       # -------------------------
       - name: Upload to MEGA (organized by subreddit)
-        if: steps.storage.outputs.provider = 'mega' || always()
+        if: steps.storage.outputs.provider == 'mega'
         timeout-minutes: 90
         env:
           MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
