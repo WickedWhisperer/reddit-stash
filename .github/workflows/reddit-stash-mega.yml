@@ -1,222 +1,135 @@
-name Reddit Stash Scraper (MEGA via rclone)
+name: Reddit Stash Scraper (MEGA)
 
-on
-  schedule
-    - cron 0 6-213   
-    - cron 0 23,3   
-  workflow_dispatch
+on:
+  schedule:
+    - cron: "0 6-21/3 * * *"
+    - cron: "0 23,3 * * *"
+  workflow_dispatch:
 
-concurrency
-  group ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress true
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
-jobs
-  run-script
-    runs-on ubuntu-latest
-    timeout-minutes 240
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
 
-    steps
-      - name Checkout repository (with write permissions)
-        uses actionscheckout@v4
-        with
-          persist-credentials true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        timeout-minutes: 1
 
-      - name TruffleHog OSS (verify scripts)
-        if ${{ github.event_name != 'schedule' }}
-        uses trufflesecuritytrufflehog@main
-        with
-          extra_args --only-verified
+      - name: TruffleHog OSS
+        if: github.event_name != 'schedule'
+        uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --only-verified
 
-      - name Verify critical scripts exist
-        run 
+      - name: Verify critical scripts exist
+        run: |
           missing=0
-          for script in reddit_stash.py dropbox_utils.py storage_utils.py; do
-            if [ ! -f $script ]; then
-              echo errorMissing critical script $script
+          for script in reddit_stash.py; do
+            if [ ! -f "$script" ]; then
+              echo "::error::Missing critical script: $script"
               missing=$((missing + 1))
             fi
           done
           if [ $missing -gt 0 ]; then
             exit 1
           fi
-          echo All critical scripts verified.
+          echo "All critical scripts verified."
 
-      - name Create semi-annual cache key
-        id cache-key
-        run 
+      - name: Create semi-annual cache key
+        id: cache-key
+        run: |
           year=$(date +'%Y')
           month=$(date +'%-m')
-          half_year=$((month = 6  1  2))
-          echo date=${year}-H${half_year}  $GITHUB_OUTPUT
-          echo Using cache key ${year}-H${half_year}
+          if [ "$month" -le 6 ]; then
+            half_year=1
+          else
+            half_year=2
+          fi
+          echo "date=${year}-H${half_year}" >> "$GITHUB_OUTPUT"
 
-      - name Set up Python
-        uses actionssetup-python@v4
-        with
-          python-version '3.12'
-          cache 'pip'
-          cache-dependency-path requirements.txt
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
 
-      - name Install dependencies (same as upstream)
-        env
-          PIP_DISABLE_PIP_VERSION_CHECK 1
-          PIP_NO_WARN_SCRIPT_LOCATION 1
-          PIP_ROOT_USER_ACTION ignore
-          SEMI_ANNUAL_REFRESH ${{ steps.cache-key.outputs.date }}
-        run 
+      - name: Install dependencies
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: 1
+          PIP_NO_WARN_SCRIPT_LOCATION: 1
+          PIP_ROOT_USER_ACTION: ignore
+          SEMI_ANNUAL_REFRESH: ${{ steps.cache-key.outputs.date }}
+        run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # do NOT install mega.py (pycrypto builds fail on runner)
-          # rclone will be installed in the MEGA upload step when needed
 
-      - name Detect storage provider
-        id storage
-        env
-          STORAGE_PROVIDER ${{ secrets.STORAGE_PROVIDER }}
-        run 
-          if [ ${STORAGE_PROVIDER} = s3 ]; then
-            echo provider=s3  $GITHUB_OUTPUT
-          elif [ ${STORAGE_PROVIDER} = mega ]; then
-            echo provider=mega  $GITHUB_OUTPUT
-          else
-            echo provider=dropbox  $GITHUB_OUTPUT
-          fi
+      - name: Install rclone
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rclone
 
-      - name (optional) Download from Dropbox
-        if ${{ steps.storage.outputs.provider != 's3' && steps.storage.outputs.provider != 'mega' }}
-        timeout-minutes 10
-        env
-          DROPBOX_REFRESH_TOKEN ${{ secrets.DROPBOX_REFRESH_TOKEN }}
-          DROPBOX_APP_KEY ${{ secrets.DROPBOX_APP_KEY }}
-          DROPBOX_APP_SECRET ${{ secrets.DROPBOX_APP_SECRET }}
-        run 
-          python dropbox_utils.py --download
+      - name: Configure rclone for MEGA
+        env:
+          MEGA_USER: ${{ secrets.MEGA_USER }}
+          MEGA_PASS: ${{ secrets.MEGA_PASS }}
+        run: |
+          rclone config create mega mega \
+            user "$MEGA_USER" \
+            pass "$MEGA_PASS"
 
-      - name (optional) Download from S3
-        if ${{ steps.storage.outputs.provider == 's3' }}
-        timeout-minutes 10
-        env
-          STORAGE_PROVIDER s3
-          AWS_ACCESS_KEY_ID ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION ${{ secrets.AWS_DEFAULT_REGION }}
-          AWS_S3_BUCKET ${{ secrets.AWS_S3_BUCKET }}
-          S3_STORAGE_CLASS ${{ secrets.S3_STORAGE_CLASS }}
-        run 
-          python storage_utils.py --download
+          echo "Testing connection to MEGA"
+          rclone lsf mega: || echo "Remote empty or inaccessible"
 
-      - name Run reddit_stash.py (main processing)
-        timeout-minutes 120
-        env
-          REDDIT_CLIENT_ID ${{ secrets.REDDIT_CLIENT_ID }}
-          REDDIT_CLIENT_SECRET ${{ secrets.REDDIT_CLIENT_SECRET }}
-          REDDIT_USERNAME ${{ secrets.REDDIT_USERNAME }}
-          REDDIT_PASSWORD ${{ secrets.REDDIT_PASSWORD }}
-          IMGUR_CLIENT_IDS ${{ secrets.IMGUR_CLIENT_IDS }}
-          STORAGE_PROVIDER ${{ secrets.STORAGE_PROVIDER }}
-          AWS_S3_BUCKET ${{ secrets.AWS_S3_BUCKET }}
-          S3_STORAGE_CLASS ${{ secrets.S3_STORAGE_CLASS }}
-        run 
+      - name: Run Reddit Stash Script
+        timeout-minutes: 120
+        env:
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
+          REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
+          IMGUR_CLIENT_IDS: ${{ secrets.IMGUR_CLIENT_IDS }}
+        run: |
           python reddit_stash.py
 
-      - name Upload to MEGA via rclone (organized by subreddit)
-        if ${{ steps.storage.outputs.provider == 'mega' }}
-        timeout-minutes 150
-        env
-          MEGA_EMAIL ${{ secrets.MEGA_EMAIL }}
-          MEGA_PASSWORD ${{ secrets.MEGA_PASSWORD }}
-        run 
-          set -euo pipefail
-          echo Installing rclone...
-          curl httpsrclone.orginstall.sh  sudo bash
+      - name: Show archive size
+        run: |
+          echo "Archive summary:"
+          du -sh archive || true
+          ls -lah archive || true
 
-          echo Configuring rclone remote for MEGA...
-          rclone config create mega mega user $MEGA_EMAIL pass $MEGA_PASSWORD --non-interactive  true
+      - name: Upload metadata first
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H%MZ")
+          TARGET="mega:reddit-archive/${TIMESTAMP}"
 
-          echo Copying archive to megareddit-archive ...
-          rclone copy archive megareddit-archive --checksum --transfers 4 --checkers 8 --progress  true
+          echo "Uploading metadata..."
+          rclone copy archive "$TARGET" \
+            --include "*.json" \
+            --include "*.md" \
+            --transfers 4 \
+            --checkers 8 \
+            --retries 5
 
-          echo Generating remote listing...
-          rclone lsjson --recursive megareddit-archive  remote_list.json  true
+      - name: Upload media files
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H%MZ")
+          TARGET="mega:reddit-archive/${TIMESTAMP}"
 
-          echo Mapping uploaded media to uploaded_mega.txt and committing...
-          python - 'PY'
-import json, os, subprocess
-ARCHIVE_ROOT = archive
-UPLOADED_FILE = uploaded_mega.txt
-media_exts = {.jpg,.jpeg,.png,.gif,.mp4,.webm,.mov,.mkv,.bmp,.webp}
+          echo "Uploading media..."
+          rclone copy archive "$TARGET" \
+            --exclude "*.json" \
+            --exclude "*.md" \
+            --transfers 2 \
+            --checkers 4 \
+            --retries 5 || echo "Media upload failed or storage quota exceeded"
 
-remote_paths = set()
-if os.path.exists(remote_list.json)
-    try
-        with open(remote_list.json, r, encoding=utf-8) as f
-            remote = json.load(f)
-        for item in remote
-            path = item.get(Path, )
-            if path and not path.endswith()
-                remote_paths.add(path)
-    except Exception as e
-        print(Warning could not parse remote_list.json, e)
-
-uploaded_now = []
-for root, dirs, files in os.walk(ARCHIVE_ROOT)
-    for fn in files
-        ext = os.path.splitext(fn)[1].lower()
-        if ext in media_exts
-            rel = os.path.relpath(os.path.join(root, fn), ARCHIVE_ROOT).replace(os.sep, )
-            if rel in remote_paths
-                uploaded_now.append(rel)
-
-if uploaded_now
-    if os.path.exists(UPLOADED_FILE)
-        with open(UPLOADED_FILE, r, encoding=utf-8) as f
-            existing = set(l.strip() for l in f if l.strip())
-    else
-        existing = set()
-    new = [p for p in uploaded_now if p not in existing]
-    if new
-        with open(UPLOADED_FILE, a, encoding=utf-8) as f
-            for p in new
-                f.write(p + n)
-        try
-            subprocess.run(['git', 'config', 'user.name', 'github-actions'], check=True)
-            subprocess.run(['git', 'config', 'user.email', 'actions@github.com'], check=True)
-            subprocess.run(['git', 'add', UPLOADED_FILE], check=True)
-            subprocess.run(['git', 'commit', '-m', 'chore update uploaded_mega.txt (rclone)'], check=True)
-            subprocess.run(['git', 'push'], check=True)
-            print(Persisted uploaded_mega.txt to repo.)
-        except Exception as e
-            print(Warning could not push uploaded_mega.txt, e)
-else
-    print(No new uploaded media found on remote.)
-PY
-
-      - name Upload to Dropbox (original behavior)
-        if ${{ steps.storage.outputs.provider != 's3' && steps.storage.outputs.provider != 'mega' }}
-        timeout-minutes 50
-        env
-          DROPBOX_REFRESH_TOKEN ${{ secrets.DROPBOX_REFRESH_TOKEN }}
-          DROPBOX_APP_KEY ${{ secrets.DROPBOX_APP_KEY }}
-          DROPBOX_APP_SECRET ${{ secrets.DROPBOX_APP_SECRET }}
-        run 
-          python dropbox_utils.py --upload
-
-      - name Upload to S3 (original behavior)
-        if ${{ steps.storage.outputs.provider == 's3' }}
-        timeout-minutes 50
-        env
-          STORAGE_PROVIDER s3
-          AWS_ACCESS_KEY_ID ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION ${{ secrets.AWS_DEFAULT_REGION }}
-          AWS_S3_BUCKET ${{ secrets.AWS_S3_BUCKET }}
-          S3_STORAGE_CLASS ${{ secrets.S3_STORAGE_CLASS }}
-        run 
-          python storage_utils.py --upload
-
-      - name Upload metadata artifact (backup)
-        uses actionsupload-artifact@v4
-        with
-          name reddit-archive-metadata
-          path archive
-          retention-days 90
+      - name: List uploaded files
+        run: |
+          echo "Files uploaded:"
+          rclone lsf mega:reddit-archive || true
