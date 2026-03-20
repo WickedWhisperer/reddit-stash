@@ -16,7 +16,6 @@ jobs:
     timeout-minutes: 240
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -46,7 +45,6 @@ jobs:
             pass "$MEGA_PASSWORD" \
             --non-interactive
 
-      # ✅ Step 1: Download previous archive (CRITICAL for original logic)
       - name: Download previous archive from MEGA
         run: |
           mkdir -p reddit
@@ -59,7 +57,26 @@ jobs:
             --low-level-retries 20 \
             --progress || true
 
-      # ✅ Step 2: Update archive with new Reddit data
+      - name: Enable video downloads for MEGA run
+        run: |
+          python - <<'PY'
+          import configparser
+
+          config = configparser.ConfigParser()
+          config.read('settings.ini')
+
+          if 'Media' not in config:
+              config['Media'] = {}
+
+          config['Media']['download_videos'] = 'true'
+          config['Media']['download_audio'] = 'false'
+
+          with open('settings.ini', 'w', encoding='utf-8') as f:
+              config.write(f)
+
+          print("Temporary settings.ini updated for MEGA: videos enabled.")
+          PY
+
       - name: Run reddit_stash.py
         env:
           REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
@@ -70,7 +87,6 @@ jobs:
         run: |
           python reddit_stash.py
 
-      # ✅ Step 3: Upload updated archive (optimized + resumable)
       - name: Upload updated archive to MEGA
         run: |
           rclone copy reddit mega:reddit-archive \
