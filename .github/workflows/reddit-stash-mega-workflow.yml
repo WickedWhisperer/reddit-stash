@@ -69,7 +69,7 @@ jobs:
               config['Media'] = {}
 
           config['Media']['download_videos'] = 'true'
-          config['Media']['download_audio'] = 'false'
+          config['Media']['download_audio'] = 'true'
 
           with open('settings.ini', 'w', encoding='utf-8') as f:
               config.write(f)
