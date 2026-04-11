@@ -2,26 +2,11 @@ name: Reddit Stash Scraper
 
 on:
   schedule:
-    # TIMEZONE INFORMATION: 
-    # - GitHub Actions uses UTC time for all cron schedules
-    # - CET is UTC+1 in winter and UTC+2 (CEST) in summer
-    # - To convert from your local time to UTC: subtract your UTC offset (e.g., for CEST: 14:00 CEST - 2 hours = 12:00 UTC)
-    # - To convert from UTC to your local time: add your UTC offset (e.g., for CEST: 12:00 UTC + 2 hours = 14:00 CEST)
-    #
-    # ADJUSTING FOR YOUR TIMEZONE:
-    # 1. Determine your timezone's UTC offset (examples: US Eastern = UTC-4/5, Japan = UTC+9, UK = UTC+0/1)
-    # 2. For desired local time X, set the UTC time to: X - (your UTC offset)
-    # 3. Update both cron expressions below with your calculated UTC times
-    
-    # Higher frequency during peak hours (8:00-23:00 CEST = 6:00-21:00 UTC)
-    - cron: "0 6-21/3 * * *"  # Every 3 hours during peak hours (converts to 8:00-23:00 CET time in summer)
-    
-    # Lower frequency during off-peak hours
-    - cron: "0 23,3 * * *"    # Twice during off-peak (converts to 1:00 and 5:00 CET time in summer)
-  
-  workflow_dispatch:           # Manual trigger option
+    # GitHub Actions uses UTC
+    - cron: "0 6-21/3 * * *"
+    - cron: "0 23,3 * * *"
+  workflow_dispatch:
 
-# Prevent multiple workflow runs executing simultaneously
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -29,143 +14,139 @@ concurrency:
 jobs:
   run-script:
     runs-on: ubuntu-latest
-    timeout-minutes: 180  # Kill job if it runs longer than 3 hours (needed for extensive media downloads and recovery cascade)
-      
+    timeout-minutes: 180
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      timeout-minutes: 1
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        timeout-minutes: 1
 
-    - name: TruffleHog OSS
-      if: github.event_name != 'schedule'
-      uses: trufflesecurity/trufflehog@main
-      with:
-        extra_args: --only-verified
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
 
-    # Verify all entry-point scripts exist before spending time on setup
-    - name: Verify critical scripts exist
-      run: |
-        missing=0
-        for script in reddit_stash.py dropbox_utils.py storage_utils.py; do
-          if [ ! -f "$script" ]; then
-            echo "::error::Missing critical script: $script"
-            missing=$((missing + 1))
+      - name: TruffleHog OSS
+        if: github.event_name != 'schedule'
+        uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --only-verified
+
+      - name: Verify critical scripts exist
+        run: |
+          missing=0
+          for script in reddit_stash.py dropbox_utils.py storage_utils.py; do
+            if [ ! -f "$script" ]; then
+              echo "::error::Missing critical script: $script"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ $missing -gt 0 ]; then
+            exit 1
           fi
-        done
-        if [ $missing -gt 0 ]; then
-          exit 1
-        fi
-        echo "All critical scripts verified."
+          echo "All critical scripts verified."
 
-    # Create 6-month refresh key for dependency cache invalidation
-    - name: Create semi-annual cache key
-      id: cache-key
-      run: |
-        # Get current year and determine which half of the year we're in (1 or 2)
-        year=$(date +'%Y')
-        month=$(date +'%-m')
-        half_year=$((month <= 6 ? 1 : 2))
-        echo "date=${year}-H${half_year}" >> $GITHUB_OUTPUT
-        echo "Using cache key: ${year}-H${half_year}"
+      - name: Create semi-annual cache key
+        id: cache-key
+        run: |
+          year=$(date +'%Y')
+          month=$(date +'%-m')
+          half_year=$((month <= 6 ? 1 : 2))
+          echo "date=${year}-H${half_year}" >> $GITHUB_OUTPUT
+          echo "Using cache key: ${year}-H${half_year}"
 
-    # Set up Python with built-in caching
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.12'
-        cache: 'pip'
-        cache-dependency-path: requirements.txt
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
 
-    # Install dependencies with pip
-    - name: Install dependencies
-      env:
-        PIP_DISABLE_PIP_VERSION_CHECK: 1
-        PIP_NO_WARN_SCRIPT_LOCATION: 1
-        PIP_ROOT_USER_ACTION: ignore
-        # This forces cache invalidation every 6 months
-        SEMI_ANNUAL_REFRESH: ${{ steps.cache-key.outputs.date }}
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      - name: Install dependencies
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: 1
+          PIP_NO_WARN_SCRIPT_LOCATION: 1
+          PIP_ROOT_USER_ACTION: ignore
+          SEMI_ANNUAL_REFRESH: ${{ steps.cache-key.outputs.date }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-    # --- Determine storage provider ---
-    - name: Detect storage provider
-      id: storage
-      env:
-        STORAGE_PROVIDER: ${{ secrets.STORAGE_PROVIDER }}
-      run: |
-        if [ "$STORAGE_PROVIDER" = "s3" ]; then
-          echo "provider=s3" >> $GITHUB_OUTPUT
-        else
-          echo "provider=dropbox" >> $GITHUB_OUTPUT
-        fi
-        echo "Using storage provider: $(cat $GITHUB_OUTPUT | grep provider | cut -d= -f2)"
+      - name: Verify ffmpeg is installed
+        run: ffmpeg -version
 
-    # --- Storage: Download (Dropbox) ---
-    - name: Download from Dropbox
-      if: steps.storage.outputs.provider != 's3'
-      timeout-minutes: 2
-      env:
-        DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
-        DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
-        DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
-      run: |
-        python dropbox_utils.py --download
+      - name: Detect storage provider
+        id: storage
+        env:
+          STORAGE_PROVIDER: ${{ secrets.STORAGE_PROVIDER }}
+        run: |
+          if [ "$STORAGE_PROVIDER" = "s3" ]; then
+            echo "provider=s3" >> $GITHUB_OUTPUT
+          else
+            echo "provider=dropbox" >> $GITHUB_OUTPUT
+          fi
+          echo "Using storage provider: $(cat $GITHUB_OUTPUT | grep provider | cut -d= -f2)"
 
-    # --- Storage: Download (S3) ---
-    - name: Install S3 dependencies
-      if: steps.storage.outputs.provider == 's3'
-      run: pip install -r requirements-s3.txt
+      - name: Download from Dropbox
+        if: steps.storage.outputs.provider != 's3'
+        timeout-minutes: 2
+        env:
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+        run: |
+          python dropbox_utils.py --download
 
-    - name: Download from S3
-      if: steps.storage.outputs.provider == 's3'
-      timeout-minutes: 5
-      env:
-        STORAGE_PROVIDER: s3
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
-        AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
-        S3_STORAGE_CLASS: ${{ secrets.S3_STORAGE_CLASS }}
-      run: |
-        python storage_utils.py --download
+      - name: Install S3 dependencies
+        if: steps.storage.outputs.provider == 's3'
+        run: pip install -r requirements-s3.txt
 
-    # Process Reddit data
-    - name: Run Reddit Stash Script
-      timeout-minutes: 90
-      env:
-        REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
-        REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
-        REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
-        REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
-        IMGUR_CLIENT_IDS: ${{ secrets.IMGUR_CLIENT_IDS }}
-        STORAGE_PROVIDER: ${{ secrets.STORAGE_PROVIDER }}
-        AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
-        S3_STORAGE_CLASS: ${{ secrets.S3_STORAGE_CLASS }}
-      run: |
-        python reddit_stash.py
+      - name: Download from S3
+        if: steps.storage.outputs.provider == 's3'
+        timeout-minutes: 5
+        env:
+          STORAGE_PROVIDER: s3
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+          S3_STORAGE_CLASS: ${{ secrets.S3_STORAGE_CLASS }}
+        run: |
+          python storage_utils.py --download
 
-    # --- Storage: Upload (Dropbox) ---
-    - name: Upload to Dropbox
-      if: steps.storage.outputs.provider != 's3'
-      timeout-minutes: 50
-      env:
-        DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
-        DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
-        DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
-      run: |
-        python dropbox_utils.py --upload
+      - name: Run Reddit Stash Script
+        timeout-minutes: 90
+        env:
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
+          REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
+          IMGUR_CLIENT_IDS: ${{ secrets.IMGUR_CLIENT_IDS }}
+          STORAGE_PROVIDER: ${{ secrets.STORAGE_PROVIDER }}
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+          S3_STORAGE_CLASS: ${{ secrets.S3_STORAGE_CLASS }}
+        run: |
+          python reddit_stash.py
 
-    # --- Storage: Upload (S3) ---
-    - name: Upload to S3
-      if: steps.storage.outputs.provider == 's3'
-      timeout-minutes: 50
-      env:
-        STORAGE_PROVIDER: s3
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
-        AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
-        S3_STORAGE_CLASS: ${{ secrets.S3_STORAGE_CLASS }}
-      run: |
-        python storage_utils.py --upload
+      - name: Upload to Dropbox
+        if: steps.storage.outputs.provider != 's3'
+        timeout-minutes: 50
+        env:
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+        run: |
+          python dropbox_utils.py --upload
+
+      - name: Upload to S3
+        if: steps.storage.outputs.provider == 's3'
+        timeout-minutes: 50
+        env:
+          STORAGE_PROVIDER: s3
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+          S3_STORAGE_CLASS: ${{ secrets.S3_STORAGE_CLASS }}
+        run: |
+          python storage_utils.py --upload
