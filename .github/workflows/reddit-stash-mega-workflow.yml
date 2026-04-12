@@ -53,31 +53,42 @@ jobs:
             pass "$MEGA_PASSWORD" \
             --non-interactive
 
-      - name: Download previous archive from MEGA
+      - name: Restore only file_log.json from MEGA
         run: |
           mkdir -p reddit
-          rclone copy mega:reddit-archive reddit \
-            --size-only \
-            --ignore-existing \
-            --transfers 2 \
-            --checkers 4 \
-            --retries 10 \
-            --low-level-retries 20 \
+          rclone copy mega:reddit-archive/file_log.json reddit/file_log.json \
             --progress || true
 
-      - name: Enable video downloads for MEGA run
+      - name: Enable LOG mode and video-only mode for MEGA run
         run: |
           python - <<'PY'
           import configparser
+
           config = configparser.ConfigParser()
           config.read('settings.ini')
+
+          if 'Settings' not in config:
+              config['Settings'] = {}
           if 'Media' not in config:
               config['Media'] = {}
+
+          # Mirror the standard scraper's fast dedupe behavior
+          config['Settings']['save_directory'] = 'reddit/'
+          config['Settings']['check_type'] = 'LOG'
+          config['Settings']['process_api'] = 'true'
+          config['Settings']['process_gdpr'] = 'false'
+
+          # Keep MEGA focused on videos/gifs
+          config['Media']['download_enabled'] = 'true'
+          config['Media']['download_images'] = 'false'
           config['Media']['download_videos'] = 'true'
           config['Media']['download_audio'] = 'true'
+          config['Media']['download_albums'] = 'true'
+
           with open('settings.ini', 'w', encoding='utf-8') as f:
               config.write(f)
-          print("Temporary settings.ini updated for MEGA: videos enabled.")
+
+          print("Temporary settings.ini updated for MEGA LOG mode and video-only media.")
           PY
 
       - name: Run reddit_stash.py
@@ -94,7 +105,6 @@ jobs:
         run: |
           rclone copy reddit mega:reddit-archive \
             --size-only \
-            --ignore-existing \
             --transfers 2 \
             --checkers 4 \
             --retries 10 \
