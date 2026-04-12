@@ -255,63 +255,113 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             )
 
     def _get_audio_url_from_video_url(self, video_url: str) -> Optional[str]:
-        """
-        Generate audio URL from video URL.
+    """
+    Generate the best audio URL from a Reddit video URL.
 
-        Reddit stores audio at the same base URL but with different filenames
-        depending on upload era:
-        - Post-July 2023: DASH_AUDIO_128.mp4 (high quality) or DASH_AUDIO_64.mp4
-        - Pre-July 2023: DASH_audio.mp4
+    First tries the DASHPlaylist.mpd manifest, which is the most reliable
+    source for the exact audio URL. Falls back to common historical audio
+    filenames if the manifest cannot be read.
+    """
+    import logging
+    import re
 
-        Returns the first audio URL that responds successfully, or None.
-        """
-        import logging
-        _logger = logging.getLogger(__name__)
+    _logger = logging.getLogger(__name__)
 
+    try:
+        parsed = urlparse(video_url)
+        path_parts = [p for p in parsed.path.split('/') if p]
+
+        # Need a video id to build the playlist URL
+        if not path_parts:
+            return None
+
+        # v.redd.it URLs normally look like:
+        #   /<video_id>/DASH_720.mp4
+        # or /<video_id>/...
+        video_id = path_parts[0]
+        playlist_url = f"{parsed.scheme}://{parsed.netloc}/{video_id}/DASHPlaylist.mpd"
+
+        # Try the DASH manifest first
         try:
-            parsed = urlparse(video_url)
-            path_parts = parsed.path.split('/')
+            resp = self._session.get(
+                playlist_url,
+                timeout=(3.0, 10.0),
+                allow_redirects=True,
+                headers={
+                    "Accept": "application/dash+xml,application/xml;q=0.9,*/*;q=0.8"
+                },
+            )
+            if resp.status_code == 200 and resp.text:
+                # Look for audio BaseURL or direct audio segment references
+                manifest_patterns = [
+                    r'(?i)<BaseURL>([^<]*(?:DASH_AUDIO_\d+\.mp4|DASH_audio\.mp4|audio\.mp4)[^<]*)</BaseURL>',
+                    r'(?i)([^"\']*(?:DASH_AUDIO_\d+\.mp4|DASH_audio\.mp4|audio\.mp4)[^"\']*)',
+                ]
 
-            # Find the video filename index (e.g., DASH_1080.mp4)
-            dash_index = None
-            for i, part in enumerate(path_parts):
-                if 'DASH_' in part and '.mp4' in part:
-                    dash_index = i
-                    break
+                for pattern in manifest_patterns:
+                    matches = re.findall(pattern, resp.text)
+                    for candidate in matches:
+                        if not candidate:
+                            continue
 
-            if dash_index is None:
-                return None
+                        # Normalize relative URLs
+                        if candidate.startswith("/"):
+                            candidate = f"{parsed.scheme}://{parsed.netloc}{candidate}"
 
-            # Try multiple audio filename patterns (most common first to minimize HEAD requests)
-            audio_filenames = ['DASH_audio.mp4', 'DASH_AUDIO_128.mp4', 'DASH_AUDIO_64.mp4']
+                        # Preserve query string if needed
+                        if parsed.query and "?" not in candidate:
+                            candidate = f"{candidate}?{parsed.query}"
 
-            for audio_filename in audio_filenames:
-                candidate_parts = path_parts.copy()
-                candidate_parts[dash_index] = audio_filename
-                audio_path = '/'.join(candidate_parts)
-                audio_url = f"{parsed.scheme}://{parsed.netloc}{audio_path}"
-                if parsed.query:
-                    audio_url += f"?{parsed.query}"
+                        _logger.debug(f"Found audio track from DASH playlist: {candidate}")
+                        return candidate
+        except Exception as e:
+            _logger.debug(f"DASH playlist lookup failed for {video_url}: {e}")
 
-                # HEAD request to check if audio file exists
-                try:
-                    resp = self._session.head(
-                        audio_url,
-                        timeout=(3.0, 5.0),
-                        allow_redirects=True
-                    )
-                    if resp.status_code == 200:
-                        _logger.debug(f"Found audio track: {audio_filename}")
-                        return audio_url
-                except Exception:
-                    continue
-
-            _logger.debug(f"No audio track found for video: {video_url}")
+        # Fallback: try common historical audio filenames
+        if 'DASH_' not in parsed.path:
             return None
 
-        except Exception:
+        dash_index = None
+        for i, part in enumerate(path_parts):
+            if 'DASH_' in part and '.mp4' in part:
+                dash_index = i
+                break
+
+        if dash_index is None:
             return None
 
+        audio_filenames = [
+            'DASH_audio.mp4',
+            'DASH_AUDIO_128.mp4',
+            'DASH_AUDIO_64.mp4',
+        ]
+
+        for audio_filename in audio_filenames:
+            candidate_parts = path_parts.copy()
+            candidate_parts[dash_index] = audio_filename
+            audio_path = '/'.join(candidate_parts)
+            audio_url = f"{parsed.scheme}://{parsed.netloc}{audio_path}"
+            if parsed.query:
+                audio_url += f"?{parsed.query}"
+
+            try:
+                resp = self._session.head(
+                    audio_url,
+                    timeout=(3.0, 5.0),
+                    allow_redirects=True,
+                )
+                if resp.status_code == 200:
+                    _logger.debug(f"Found audio track via fallback filename: {audio_filename}")
+                    return audio_url
+            except Exception:
+                continue
+
+        _logger.debug(f"No audio track found for video: {video_url}")
+        return None
+
+    except Exception:
+        return None
+        
     def _try_dash_qualities(self, url: str, save_path: str) -> DownloadResult:
         """Try multiple DASH quality tiers when the initial quality returns 404.
 
