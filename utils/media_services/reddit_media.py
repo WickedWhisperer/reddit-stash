@@ -21,6 +21,7 @@ from ..service_abstractions import (
 )
 from ..temp_file_utils import temp_files_cleanup
 from ..constants import FFMPEG_TIMEOUT_SECONDS
+from ..feature_flags import get_media_config as get_media_feature_config
 from .base_downloader import BaseHTTPDownloader
 
 
@@ -51,6 +52,28 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                 verify_ssl=True
             )
         super().__init__(config)
+        self._media_config = get_media_feature_config()
+
+    def _get_media_size_limit(self, media_kind: str) -> int:
+        """Return the configured size limit for the requested media kind."""
+        default_limit = self.config.max_file_size
+        try:
+            media_cfg = self._media_config.get_media_config()
+        except Exception:
+            media_cfg = {}
+
+        if not media_cfg or not media_cfg.get('media_enabled', False):
+            return default_limit
+
+        if media_kind in ('image', 'preview'):
+            return int(media_cfg.get('max_image_size', default_limit) or default_limit)
+        if media_kind == 'video':
+            return int(media_cfg.get('max_video_size', default_limit) or default_limit)
+        if media_kind == 'audio':
+            # Audio tracks are small, but using the video limit prevents false aborts
+            return int(media_cfg.get('max_video_size', default_limit) or default_limit)
+
+        return default_limit
 
     def can_handle(self, url: str) -> bool:
         """Check if this service can handle the given URL."""
@@ -150,14 +173,14 @@ class RedditMediaDownloader(BaseHTTPDownloader):
 
     def _download_reddit_image(self, url: str, save_path: str) -> DownloadResult:
         """Download Reddit hosted image (i.redd.it) with optimized headers."""
-        return self._download_with_reddit_headers(url, save_path)
+        return self._download_with_reddit_headers(url, save_path, max_file_size=self._get_media_size_limit('image'))
 
     def _download_reddit_preview(self, url: str, save_path: str) -> DownloadResult:
         """Download Reddit preview image with URL decoding and optimized headers."""
         try:
             # Reddit preview URLs often have encoding issues, clean them up
             cleaned_url = url.replace('amp;', '')
-            return self._download_with_reddit_headers(cleaned_url, save_path)
+            return self._download_with_reddit_headers(cleaned_url, save_path, max_file_size=self._get_media_size_limit('preview'))
         except Exception as e:
             return DownloadResult(
                 status=DownloadStatus.FAILED,
@@ -182,11 +205,12 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             # These lack a DASH_ segment and usually 403 on direct access
             parsed = urlparse(url)
             is_short_url = 'DASH_' not in parsed.path
+            video_limit = self._get_media_size_limit('video')
 
             if is_short_url:
                 _logger.info(f"Short v.redd.it URL detected (no DASH_ segment): {url}")
                 # Attempt a single download — if 403, fail immediately
-                video_result = self.download_file(url, save_path)
+                video_result = self.download_file(url, save_path, max_file_size=video_limit)
                 if not video_result.is_success:
                     error = video_result.error_message or ""
                     if '403' in error or 'Forbidden' in error:
@@ -205,8 +229,8 @@ class RedditMediaDownloader(BaseHTTPDownloader):
 
                 with temp_files_cleanup(temp_audio_path):
                     with ThreadPoolExecutor(max_workers=2) as pool:
-                        video_future = pool.submit(self.download_file, url, save_path)
-                        audio_future = pool.submit(self.download_file, audio_url, temp_audio_path)
+                        video_future = pool.submit(self.download_file, url, save_path, None, None, video_limit)
+                        audio_future = pool.submit(self.download_file, audio_url, temp_audio_path, None, None, video_limit)
                         video_result = video_future.result()
                         audio_result = audio_future.result()
 
@@ -216,7 +240,7 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                             error = video_result.error_message or ""
                             if '404' in error or 'Not Found' in error:
                                 _logger.info("Video DASH quality failed with 404, trying alternatives")
-                                video_result = self._try_dash_qualities(url, save_path)
+                                video_result = self._try_dash_qualities(url, save_path, max_file_size=video_limit)
                         if not video_result.is_success:
                             return video_result
 
@@ -237,17 +261,19 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                     return video_result
             else:
                 # No audio URL or no ffmpeg, just download video
-                video_result = self.download_file(url, save_path)
+                video_result = self.download_file(url, save_path, max_file_size=video_limit)
+
                 # If 404, try alternative DASH quality tiers
                 if not video_result.is_success and 'DASH_' in url:
                     error = video_result.error_message or ""
                     if '404' in error or 'Not Found' in error:
                         _logger.info("Initial DASH quality failed with 404, trying alternatives")
-                        video_result = self._try_dash_qualities(url, save_path)
+                        video_result = self._try_dash_qualities(url, save_path, max_file_size=video_limit)
+
                 if video_result.is_success and not has_ffmpeg:
                     return replace(video_result, error_message="Audio track not merged (ffmpeg not available)")
-                return video_result
 
+                return video_result
         except Exception as e:
             return DownloadResult(
                 status=DownloadStatus.FAILED,
@@ -258,26 +284,50 @@ class RedditMediaDownloader(BaseHTTPDownloader):
         """
         Generate the best audio URL from a Reddit video URL.
 
-        First tries the DASHPlaylist.mpd manifest, which is the most reliable
-        source for the exact audio URL. Falls back to common historical audio
+        First tries the DASHPlaylist.mpd manifest because Reddit often exposes
+        the exact audio URL there. Falls back to common historical audio
         filenames if the manifest cannot be read.
         """
         import logging
         import re
+        import xml.etree.ElementTree as ET
 
         _logger = logging.getLogger(__name__)
+
+        def _normalize_candidate(candidate: str, parsed_url) -> str:
+            candidate = candidate.strip()
+            if candidate.startswith("/"):
+                candidate = f"{parsed_url.scheme}://{parsed_url.netloc}{candidate}"
+            elif candidate.startswith("//"):
+                candidate = f"{parsed_url.scheme}:{candidate}"
+            if parsed_url.query and "?" not in candidate:
+                candidate = f"{candidate}?{parsed_url.query}"
+            return candidate
+
+        def _candidate_works(candidate_url: str) -> bool:
+            try:
+                # Use GET instead of HEAD because Reddit/CDN endpoints sometimes
+                # deny HEAD even when the media is downloadable.
+                resp = self._session.get(
+                    candidate_url,
+                    timeout=(3.0, 8.0),
+                    allow_redirects=True,
+                    stream=True,
+                )
+                try:
+                    return resp.status_code == 200
+                finally:
+                    resp.close()
+            except Exception:
+                return False
 
         try:
             parsed = urlparse(video_url)
             path_parts = [p for p in parsed.path.split('/') if p]
 
-            # Need a video id to build the playlist URL
             if not path_parts:
                 return None
 
-            # v.redd.it URLs normally look like:
-            #   /<video_id>/DASH_720.mp4
-            # or /<video_id>/...
             video_id = path_parts[0]
             playlist_url = f"{parsed.scheme}://{parsed.netloc}/{video_id}/DASHPlaylist.mpd"
 
@@ -292,28 +342,65 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                     },
                 )
                 if resp.status_code == 200 and resp.text:
-                    # Look for audio BaseURL or direct audio segment references
+                    playlist_text = resp.text
+
+                    # Strip a default namespace if present so ElementTree can parse it.
+                    playlist_text = re.sub(
+                        r'\sxmlns="[^"]+"',
+                        '',
+                        playlist_text,
+                        count=1
+                    )
+
+                    try:
+                        root = ET.fromstring(playlist_text)
+                        for adaptation in root.iter():
+                            tag = adaptation.tag.split('}')[-1].lower()
+                            mime_type = (
+                                adaptation.attrib.get('mimeType', '') or
+                                adaptation.attrib.get('contentType', '')
+                            ).lower()
+
+                            if tag != 'adaptationset':
+                                continue
+                            if 'audio' not in mime_type:
+                                continue
+
+                            for base_url in adaptation.iter():
+                                base_tag = base_url.tag.split('}')[-1].lower()
+                                if base_tag != 'baseurl':
+                                    continue
+                                candidate = (base_url.text or '').strip()
+                                if not candidate:
+                                    continue
+                                candidate = _normalize_candidate(candidate, parsed)
+                                if _candidate_works(candidate):
+                                    _logger.debug(f"Found audio track from DASH playlist XML: {candidate}")
+                                    return candidate
+                    except ET.ParseError:
+                        _logger.debug(f"DASH playlist XML parse failed for {video_url}; falling back to regex parsing")
+
+                    # Regex fallback for manifests with unusual formatting
                     manifest_patterns = [
-                        r'(?i)<BaseURL>([^<]*(?:DASH_AUDIO_\d+\.mp4|DASH_audio\.mp4|audio\.mp4)[^<]*)</BaseURL>',
-                        r'(?i)([^"\']*(?:DASH_AUDIO_\d+\.mp4|DASH_audio\.mp4|audio\.mp4)[^"\']*)',
+                        r'(?is)<AdaptationSet[^>]*(?:mimeType|contentType)="[^"]*audio[^"]*"[^>]*>(.*?)</AdaptationSet>',
+                        r'(?is)(?:mimeType|contentType)="[^"]*audio[^"]*".*?(<BaseURL>.*?</BaseURL>)',
                     ]
 
                     for pattern in manifest_patterns:
-                        matches = re.findall(pattern, resp.text)
-                        for candidate in matches:
-                            if not candidate:
-                                continue
-
-                            # Normalize relative URLs
-                            if candidate.startswith("/"):
-                                candidate = f"{parsed.scheme}://{parsed.netloc}{candidate}"
-
-                            # Preserve query string if needed
-                            if parsed.query and "?" not in candidate:
-                                candidate = f"{candidate}?{parsed.query}"
-
-                            _logger.debug(f"Found audio track from DASH playlist: {candidate}")
-                            return candidate
+                        blocks = re.findall(pattern, playlist_text)
+                        for block in blocks:
+                            candidates = re.findall(
+                                r'(?is)<BaseURL>(.*?)</BaseURL>|([^<"\']+\.mp4[^<"\']*)',
+                                block
+                            )
+                            for c1, c2 in candidates:
+                                candidate = c1 or c2
+                                if not candidate:
+                                    continue
+                                candidate = _normalize_candidate(candidate, parsed)
+                                if _candidate_works(candidate):
+                                    _logger.debug(f"Found audio track from DASH playlist regex: {candidate}")
+                                    return candidate
             except Exception as e:
                 _logger.debug(f"DASH playlist lookup failed for {video_url}: {e}")
 
@@ -344,17 +431,9 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                 if parsed.query:
                     audio_url += f"?{parsed.query}"
 
-                try:
-                    resp = self._session.head(
-                        audio_url,
-                        timeout=(3.0, 5.0),
-                        allow_redirects=True,
-                    )
-                    if resp.status_code == 200:
-                        _logger.debug(f"Found audio track via fallback filename: {audio_filename}")
-                        return audio_url
-                except Exception:
-                    continue
+                if _candidate_works(audio_url):
+                    _logger.debug(f"Found audio track via fallback filename: {audio_filename}")
+                    return audio_url
 
             _logger.debug(f"No audio track found for video: {video_url}")
             return None
@@ -362,7 +441,7 @@ class RedditMediaDownloader(BaseHTTPDownloader):
         except Exception:
             return None
 
-    def _try_dash_qualities(self, url: str, save_path: str) -> DownloadResult:
+    def _try_dash_qualities(self, url: str, save_path: str, max_file_size: Optional[int] = None) -> DownloadResult:
         """Try multiple DASH quality tiers when the initial quality returns 404.
 
         Replaces DASH_NNN in the URL with progressively lower quality tiers.
@@ -378,7 +457,7 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             if candidate == url:
                 continue  # Already tried this quality
             _logger.debug(f"Trying DASH quality fallback: DASH_{quality}")
-            result = self.download_file(candidate, save_path)
+            result = self.download_file(candidate, save_path, max_file_size=max_file_size)
             last_result = result
             if result.is_success:
                 _logger.info(f"DASH quality fallback succeeded at {quality}p")
@@ -392,7 +471,7 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             error_message="All DASH quality tiers failed"
         )
 
-    def _download_with_reddit_headers(self, url: str, save_path: str) -> DownloadResult:
+    def _download_with_reddit_headers(self, url: str, save_path: str, max_file_size: Optional[int] = None) -> DownloadResult:
         """
         Download Reddit images with optimal headers to prevent HTML wrapper pages.
 
@@ -408,7 +487,7 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             'Accept-Encoding': 'gzip, deflate, br',
             'Cache-Control': 'no-cache'
         }
-        return self.download_file(url, save_path, extra_headers=reddit_headers)
+        return self.download_file(url, save_path, extra_headers=reddit_headers, max_file_size=max_file_size)
 
     def _is_ffmpeg_available(self) -> bool:
         """Check if ffmpeg is available in system PATH."""
@@ -563,3 +642,4 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             logging.getLogger(__name__).warning(f"Error extracting media URLs from submission: {e}")
 
         return media_urls
+            
