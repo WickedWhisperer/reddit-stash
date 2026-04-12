@@ -468,7 +468,8 @@ class BaseHTTPDownloader:
 
     def _download_with_retry(self, url: str, save_path: str,
                            progress_callback: Optional[Callable[[int, int], None]] = None,
-                           extra_headers: Optional[Dict[str, str]] = None) -> DownloadResult:
+                           extra_headers: Optional[Dict[str, str]] = None,
+                           max_file_size: Optional[int] = None) -> DownloadResult:
         """
         Internal method that handles the actual HTTP download with retry logic.
 
@@ -508,6 +509,7 @@ class BaseHTTPDownloader:
 
             # Get file information
             total_size = int(response.headers.get('content-length', 0))
+            effective_max_file_size = self.config.max_file_size if max_file_size is None else max_file_size
             filename = os.path.basename(save_path)
 
             # Fix filename extension if needed
@@ -515,7 +517,7 @@ class BaseHTTPDownloader:
             fixed_save_path = os.path.join(os.path.dirname(save_path), filename)
 
             # Check file size limits
-            if total_size > self.config.max_file_size:
+            if effective_max_file_size and total_size > effective_max_file_size:
                 return DownloadResult(
                     status=DownloadStatus.FAILED,
                     error_message=self._create_enhanced_error_message(
@@ -565,7 +567,7 @@ class BaseHTTPDownloader:
                         downloaded += size
 
                         # Streaming size enforcement when Content-Length was missing
-                        if self.config.max_file_size and downloaded > self.config.max_file_size:
+                        if effective_max_file_size and downloaded > effective_max_file_size:
                             size_limit_exceeded = True
                             break
 
@@ -585,11 +587,11 @@ class BaseHTTPDownloader:
                 return DownloadResult(
                     status=DownloadStatus.FAILED,
                     error_message=self._create_enhanced_error_message(
-                        f"Download aborted: exceeded max size {self.config.max_file_size:,} bytes during streaming",
+                        f"Download aborted: exceeded max size {effective_max_file_size:,} bytes during streaming",
                         url=url,
                         context={
                             'downloaded_bytes': str(downloaded),
-                            'max_file_size': str(self.config.max_file_size)
+                            'max_file_size': str(effective_max_file_size)
                         }
                     )
                 )
@@ -674,7 +676,8 @@ class BaseHTTPDownloader:
 
     def download_file(self, url: str, save_path: str,
                      progress_callback: Optional[Callable[[int, int], None]] = None,
-                     extra_headers: Optional[Dict[str, str]] = None) -> DownloadResult:
+                     extra_headers: Optional[Dict[str, str]] = None,
+                     max_file_size: Optional[int] = None) -> DownloadResult:
         """
         Download a file using streaming with progress tracking and retry logic.
 
@@ -683,6 +686,7 @@ class BaseHTTPDownloader:
             save_path: Local path to save the file
             progress_callback: Optional callback for progress updates (downloaded, total)
             extra_headers: Optional per-request headers (merged with session headers, not mutating session)
+            max_file_size: Optional file size limit override in bytes
 
         Returns:
             DownloadResult with status and metadata
@@ -698,10 +702,10 @@ class BaseHTTPDownloader:
             # Apply retry logic to the download operation
             if TENACITY_AVAILABLE:
                 retry_download = self._retry_decorator(self._download_with_retry)
-                return retry_download(url, save_path, progress_callback, extra_headers)
+                return retry_download(url, save_path, progress_callback, extra_headers, max_file_size)
             else:
                 # Fallback without retry if tenacity not available
-                return self._download_with_retry(url, save_path, progress_callback, extra_headers)
+                return self._download_with_retry(url, save_path, progress_callback, extra_headers, max_file_size)
 
         except Timeout as e:
             # Report timeout as server error
