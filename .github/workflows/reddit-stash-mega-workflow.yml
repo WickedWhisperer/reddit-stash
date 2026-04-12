@@ -79,43 +79,38 @@ jobs:
         run: |
           curl https://rclone.org/install.sh | sudo bash
 
-      - name: Configure MEGA
-        env:
-          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
-          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
-        run: |
-          rclone config create mega mega \
-            user "$MEGA_EMAIL" \
-            pass "$MEGA_PASSWORD" \
-            --non-interactive
-
       - name: Apply MEGA settings
         run: |
           cp mega_settings.ini settings.ini
 
-      - name: Restore only file_log.json from MEGA
+      - name: Download from MEGA
+        timeout-minutes: 10
+        env:
+          STORAGE_PROVIDER: mega
+          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
+          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
         run: |
-          mkdir -p reddit
-          rm -f reddit/file_log.json
-          rclone copyto mega:reddit-archive/file_log.json reddit/file_log.json --progress || true
+          python storage_utils.py --download
 
       - name: Run Reddit Stash Script
         timeout-minutes: 90
         env:
+          STORAGE_PROVIDER: mega
           REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
           REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
           REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
           IMGUR_CLIENT_IDS: ${{ secrets.IMGUR_CLIENT_IDS }}
+          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
+          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
         run: |
           python reddit_stash.py
 
-      - name: Upload updated archive to MEGA
+      - name: Upload to MEGA
+        timeout-minutes: 20
+        env:
+          STORAGE_PROVIDER: mega
+          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
+          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
         run: |
-          rclone copy reddit mega:reddit-archive \
-            --size-only \
-            --transfers 2 \
-            --checkers 4 \
-            --retries 10 \
-            --low-level-retries 20 \
-            --progress
+          python storage_utils.py --upload
