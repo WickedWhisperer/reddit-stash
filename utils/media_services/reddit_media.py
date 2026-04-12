@@ -258,6 +258,10 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                             )
 
                     # Audio failed or merge failed, return video-only
+                    if not audio_result.is_success:
+                        _logger.warning(f"Reddit audio download failed; returning video-only file: {audio_result.error_message}")
+                    else:
+                        _logger.warning(f"ffmpeg merge failed for Reddit video; returning video-only file: {merged_result.error_message}")
                     return video_result
             else:
                 # No audio URL or no ffmpeg, just download video
@@ -315,7 +319,14 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                     stream=True,
                 )
                 try:
-                    return resp.status_code == 200
+                    content_type = (resp.headers.get('content-type') or '').lower()
+                    if resp.status_code != 200:
+                        return False
+                    if content_type.startswith('audio/') or content_type.startswith('video/'):
+                        return True
+                    if 'octet-stream' in content_type:
+                        return True
+                    return False
                 finally:
                     resp.close()
             except Exception:
@@ -577,6 +588,32 @@ class RedditMediaDownloader(BaseHTTPDownloader):
         """Get the time when rate limit resets."""
         return None
 
+    @staticmethod
+    def _get_best_reddit_video_url(submission) -> Optional[str]:
+        """Return the most useful Reddit video URL for a submission.
+
+        Reddit often exposes a richer `fallback_url` (or `dash_url`) in
+        `submission.media['reddit_video']` or `submission.secure_media['reddit_video']`.
+        That URL is usually the one that preserves the DASH/stream structure
+        needed for audio merging.
+        """
+        try:
+            for attr in ('media', 'secure_media'):
+                data = getattr(submission, attr, None)
+                if not isinstance(data, dict):
+                    continue
+                reddit_video = data.get('reddit_video')
+                if not isinstance(reddit_video, dict):
+                    continue
+                for key in ('fallback_url', 'dash_url'):
+                    candidate = reddit_video.get(key)
+                    if candidate:
+                        return candidate.replace('&amp;', '&')
+        except Exception:
+            pass
+
+        return getattr(submission, 'url', None)
+
     @classmethod
     def extract_media_urls_from_submission(cls, submission) -> List[Dict[str, Any]]:
         """
@@ -603,10 +640,12 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                         })
                     elif submission.domain == 'v.redd.it':
                         # Reddit video
+                        video_url = cls._get_best_reddit_video_url(submission)
                         media_urls.append({
-                            'url': submission.url,
+                            'url': video_url or submission.url,
                             'type': 'video',
-                            'source': 'reddit_direct'
+                            'source': 'reddit_direct',
+                            'fallback_used': bool(video_url and video_url != submission.url)
                         })
 
             # Check for gallery posts
@@ -643,4 +682,4 @@ class RedditMediaDownloader(BaseHTTPDownloader):
 
         return media_urls
 
-            
+        
