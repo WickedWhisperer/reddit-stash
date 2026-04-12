@@ -681,5 +681,3 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             logging.getLogger(__name__).warning(f"Error extracting media URLs from submission: {e}")
 
         return media_urls
-
-        
