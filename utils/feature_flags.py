@@ -70,11 +70,11 @@ class MediaFeatureConfig:
 
             # Image settings
             'thumbnail_size': self.config_parser.getint('Media', 'thumbnail_size', fallback=800),
-            'max_image_size': self.config_parser.getint('Media', 'max_image_size', fallback=5242880),  # 5MB
+            'max_image_size': self.config_parser.getint('Media', 'max_image_size', fallback=5368709120),  # 5MB
 
             # Video settings
             'video_quality': self.config_parser.get('Media', 'video_quality', fallback='high'),
-            'max_video_size': self.config_parser.getint('Media', 'max_video_size', fallback=209715200),  # 200MB
+            'max_video_size': self.config_parser.getint('Media', 'max_video_size', fallback=5368709120),  # 200MB
 
             # Album settings
             'max_album_images': self.config_parser.getint('Media', 'max_album_images', fallback=50),
