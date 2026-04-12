@@ -181,7 +181,7 @@ class ConfigValidator:
 
         # Validate provider enum
         provider = self.config_parser.get('Storage', 'provider', fallback='none').lower()
-        valid_providers = ['none', 'dropbox', 's3']
+        valid_providers = ['none', 'dropbox', 's3', 'mega']
         if provider not in valid_providers:
             self.errors.append(
                 f"Invalid storage provider '{provider}'. Must be one of: {', '.join(valid_providers)}"
@@ -218,7 +218,6 @@ class ConfigValidator:
 
         # Dropbox provider needs credentials
         if provider == 'dropbox':
-            import os
             has_creds = all([
                 os.getenv('DROPBOX_REFRESH_TOKEN'),
                 os.getenv('DROPBOX_APP_KEY'),
@@ -228,6 +227,17 @@ class ConfigValidator:
                 self.warnings.append(
                     "Dropbox provider selected but DROPBOX_REFRESH_TOKEN, "
                     "DROPBOX_APP_KEY, or DROPBOX_APP_SECRET env vars not set."
+                )
+
+        # MEGA provider needs credentials
+        if provider == 'mega':
+            has_creds = all([
+                os.getenv('MEGA_EMAIL'),
+                os.getenv('MEGA_PASSWORD'),
+            ])
+            if not has_creds:
+                self.warnings.append(
+                    "MEGA provider selected but MEGA_EMAIL or MEGA_PASSWORD env vars not set."
                 )
 
     def validate_directory_permissions(self):
@@ -279,10 +289,12 @@ class ConfigValidator:
         save_type = self.config_parser.get('Settings', 'save_type', fallback='ALL')
         process_api = self.config_parser.getboolean('Settings', 'process_api', fallback=True)
         process_gdpr = self.config_parser.getboolean('Settings', 'process_gdpr', fallback=False)
+        storage_provider = self.config_parser.get('Storage', 'provider', fallback='none').lower()
 
         summary.append(f"Save Type: {save_type}")
         summary.append(f"API Processing: {'Enabled' if process_api else 'Disabled'}")
         summary.append(f"GDPR Processing: {'Enabled' if process_gdpr else 'Disabled'}")
+        summary.append(f"Storage Provider: {storage_provider}")
 
         # Media features summary (from feature_flags module)
         from .feature_flags import get_feature_summary
