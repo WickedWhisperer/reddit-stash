@@ -1,9 +1,6 @@
-"""
-Core abstractions for storage providers.
+"""Shared storage abstractions for Reddit Stash."""
 
-Defines the StorageProviderProtocol that all storage backends must implement,
-along with frozen dataclass value types for file metadata and sync results.
-"""
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
@@ -12,23 +9,27 @@ from typing import List, Optional, Protocol, runtime_checkable
 
 class StorageProvider(Enum):
     """Supported storage provider types."""
+
     NONE = "none"
     DROPBOX = "dropbox"
     S3 = "s3"
+    MEGA = "mega"
 
 
 @dataclass(frozen=True)
 class StorageFileInfo:
     """Metadata for a file stored in a remote provider."""
+
     remote_path: str
-    content_hash: Optional[str] = None  # BLAKE3 hex digest
+    content_hash: Optional[str] = None
     size_bytes: int = 0
-    last_modified: Optional[str] = None  # ISO 8601 timestamp
+    last_modified: Optional[str] = None
 
 
 @dataclass(frozen=True)
 class SyncResult:
     """Result of a sync (upload or download) operation."""
+
     uploaded: int = 0
     downloaded: int = 0
     skipped: int = 0
@@ -49,7 +50,6 @@ class SyncResult:
         return (self.uploaded + self.downloaded) / total
 
     def summary(self) -> str:
-        """Human-readable summary of the sync result."""
         parts = []
         if self.uploaded:
             parts.append(f"{self.uploaded} uploaded")
@@ -59,11 +59,8 @@ class SyncResult:
             parts.append(f"{self.skipped} skipped")
         if self.failed:
             parts.append(f"{self.failed} failed")
-
-        size_mb = self.bytes_transferred / (1024 * 1024)
-        parts.append(f"{size_mb:.2f} MB")
+        parts.append(f"{self.bytes_transferred / (1024 * 1024):.2f} MB")
         parts.append(f"{self.elapsed_seconds:.1f}s")
-
         return ", ".join(parts)
 
 
@@ -95,16 +92,22 @@ class StorageProviderProtocol(Protocol):
         """Check whether a remote file exists."""
         ...
 
-    def upload_directory(self, local_directory: str, remote_directory: str,
-                         check_type: str = "DIR") -> SyncResult:
+    def upload_directory(self, local_directory: str, remote_directory: str, check_type: str = "DIR") -> SyncResult:
         """Upload an entire local directory to remote storage."""
         ...
 
-    def download_directory(self, remote_directory: str, local_directory: str,
-                           check_type: str = "DIR") -> SyncResult:
+    def download_directory(self, remote_directory: str, local_directory: str, check_type: str = "DIR") -> SyncResult:
         """Download an entire remote directory to local storage."""
         ...
 
     def get_provider_name(self) -> str:
         """Return the human-readable provider name."""
         ...
+
+
+__all__ = [
+    "StorageProvider",
+    "StorageFileInfo",
+    "SyncResult",
+    "StorageProviderProtocol",
+    ]
