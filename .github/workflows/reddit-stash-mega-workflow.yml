@@ -1,7 +1,8 @@
-name: Reddit Stash Scraper (MEGA-Working)
+name: Reddit Stash Scraper (MEGA)
 
 on:
   schedule:
+    # GitHub Actions uses UTC
     - cron: "0 6-21/3 * * *"
     - cron: "0 23,3 * * *"
   workflow_dispatch:
@@ -13,25 +14,60 @@ concurrency:
 jobs:
   run-script:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 180
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        timeout-minutes: 1
 
       - name: Install ffmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
+      - name: TruffleHog OSS
+        if: github.event_name != 'schedule'
+        uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --only-verified
+
+      - name: Verify critical scripts exist
+        run: |
+          missing=0
+          for script in reddit_stash.py dropbox_utils.py storage_utils.py; do
+            if [ ! -f "$script" ]; then
+              echo "::error::Missing critical script: $script"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ $missing -gt 0 ]; then
+            exit 1
+          fi
+          echo "All critical scripts verified."
+
+      - name: Create semi-annual cache key
+        id: cache-key
+        run: |
+          year=$(date +'%Y')
+          month=$(date +'%-m')
+          half_year=$((month <= 6 ? 1 : 2))
+          echo "date=${year}-H${half_year}" >> $GITHUB_OUTPUT
+          echo "Using cache key: ${year}-H${half_year}"
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.12"
-          cache: pip
+          python-version: '3.12'
+          cache: 'pip'
           cache-dependency-path: requirements.txt
 
       - name: Install dependencies
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: 1
+          PIP_NO_WARN_SCRIPT_LOCATION: 1
+          PIP_ROOT_USER_ACTION: ignore
+          SEMI_ANNUAL_REFRESH: ${{ steps.cache-key.outputs.date }}
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -53,43 +89,23 @@ jobs:
             pass "$MEGA_PASSWORD" \
             --non-interactive
 
-      - name: Restore only file_log.json from MEGA
+      - name: Apply MEGA settings
+        run: |
+          cp mega_settings.ini settings.ini
+
+      - name: Download previous archive from MEGA
         run: |
           mkdir -p reddit
-          rm -rf reddit/file_log.json
-          rclone copyto mega:reddit-archive/file_log.json reddit/file_log.json --progress || true
+          rclone copy mega:reddit-archive reddit \
+            --size-only \
+            --transfers 2 \
+            --checkers 4 \
+            --retries 10 \
+            --low-level-retries 20 \
+            --progress || true
 
-      - name: Enable LOG mode and video-only mode for MEGA run
-        run: |
-          python - <<'PY'
-          import configparser
-
-          config = configparser.ConfigParser()
-          config.read('settings.ini')
-
-          if 'Settings' not in config:
-              config['Settings'] = {}
-          if 'Media' not in config:
-              config['Media'] = {}
-
-          config['Settings']['save_directory'] = 'reddit/'
-          config['Settings']['check_type'] = 'LOG'
-          config['Settings']['process_api'] = 'true'
-          config['Settings']['process_gdpr'] = 'true'
-
-          config['Media']['download_enabled'] = 'true'
-          config['Media']['download_images'] = 'false'
-          config['Media']['download_videos'] = 'true'
-          config['Media']['download_audio'] = 'true'
-          config['Media']['download_albums'] = 'true'
-
-          with open('settings.ini', 'w', encoding='utf-8') as f:
-              config.write(f)
-
-          print("Temporary settings.ini updated for MEGA LOG mode and video-only media.")
-          PY
-
-      - name: Run reddit_stash.py
+      - name: Run Reddit Stash Script
+        timeout-minutes: 90
         env:
           REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
