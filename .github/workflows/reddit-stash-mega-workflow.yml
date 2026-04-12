@@ -56,8 +56,8 @@ jobs:
       - name: Restore only file_log.json from MEGA
         run: |
           mkdir -p reddit
-          rclone copy mega:reddit-archive/file_log.json reddit/file_log.json \
-            --progress || true
+          rm -rf reddit/file_log.json
+          rclone copyto mega:reddit-archive/file_log.json reddit/file_log.json --progress || true
 
       - name: Enable LOG mode and video-only mode for MEGA run
         run: |
@@ -72,13 +72,11 @@ jobs:
           if 'Media' not in config:
               config['Media'] = {}
 
-          # Mirror the standard scraper's fast dedupe behavior
           config['Settings']['save_directory'] = 'reddit/'
           config['Settings']['check_type'] = 'LOG'
           config['Settings']['process_api'] = 'true'
-          config['Settings']['process_gdpr'] = 'false'
+          config['Settings']['process_gdpr'] = 'true'
 
-          # Keep MEGA focused on videos/gifs
           config['Media']['download_enabled'] = 'true'
           config['Media']['download_images'] = 'false'
           config['Media']['download_videos'] = 'true'
