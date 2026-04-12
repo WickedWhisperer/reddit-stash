@@ -61,7 +61,7 @@ class MediaDownloadManager:
         self._recovery_service = ContentRecoveryService(config=self._media_config)
 
         # Initialize services if media downloads are enabled
-        if self._media_config.is_images_enabled():
+        if self._media_config.is_media_enabled():
             self._initialize_services()
 
     def _is_permanent_failure(self, error_message: str) -> bool:
@@ -162,7 +162,7 @@ class MediaDownloadManager:
         Returns:
             Local file path if successful, None if failed
         """
-        if not self._media_config.is_images_enabled():
+        if not self._media_config.is_media_enabled():
             self._logger.info("Media downloads disabled by configuration")
             return None
 
