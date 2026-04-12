@@ -1,7 +1,6 @@
-"""
-Storage provider abstraction layer for Reddit Stash.
+"""Storage provider abstraction layer for Reddit Stash.
 
-Supports multiple cloud storage backends (Dropbox, S3) through a unified
+Supports multiple cloud storage backends (Dropbox, S3, MEGA) through a unified
 Protocol-based interface with frozen dataclass value types.
 """
 
