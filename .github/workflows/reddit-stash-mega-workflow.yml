@@ -84,7 +84,7 @@ jobs:
           cp mega_settings.ini settings.ini
 
       - name: Download from MEGA
-        timeout-minutes: 10
+        timeout-minutes: 90
         env:
           STORAGE_PROVIDER: mega
           MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
@@ -107,7 +107,7 @@ jobs:
           python reddit_stash.py
 
       - name: Upload to MEGA
-        timeout-minutes: 20
+        timeout-minutes: 90
         env:
           STORAGE_PROVIDER: mega
           MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
