@@ -91,11 +91,12 @@ jobs:
         if: steps.storage.outputs.provider != 's3'
         timeout-minutes: 2
         env:
+          STORAGE_PROVIDER: dropbox
           DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
           DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
           DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
         run: |
-          python dropbox_utils.py --download
+          python storage_utils.py --download
 
       - name: Install S3 dependencies
         if: steps.storage.outputs.provider == 's3'
@@ -132,11 +133,12 @@ jobs:
         if: steps.storage.outputs.provider != 's3'
         timeout-minutes: 50
         env:
+          STORAGE_PROVIDER: dropbox
           DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
           DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
           DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
         run: |
-          python dropbox_utils.py --upload
+          python storage_utils.py --upload
 
       - name: Upload to S3
         if: steps.storage.outputs.provider == 's3'
