@@ -426,10 +426,10 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             for audio_filename in audio_filenames:
                 candidate_parts = path_parts.copy()
                 candidate_parts[dash_index] = audio_filename
-                audio_path = '/'.join(candidate_parts)
-                audio_url = f"{parsed.scheme}://{parsed.netloc}{audio_path}"
-                if parsed.query:
-                    audio_url += f"?{parsed.query}"
+
+                # Keep the leading slash so the host stays valid (v.redd.it, not v.redd.ituuid...)
+                audio_path = '/' + '/'.join(candidate_parts)
+                audio_url = _normalize_candidate(audio_path, parsed)
 
                 if _candidate_works(audio_url):
                     _logger.debug(f"Found audio track via fallback filename: {audio_filename}")
@@ -642,4 +642,5 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             logging.getLogger(__name__).warning(f"Error extracting media URLs from submission: {e}")
 
         return media_urls
+
             
