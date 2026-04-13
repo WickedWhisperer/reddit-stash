@@ -10,10 +10,12 @@ from utils.storage.base import (
     SyncResult,
     StorageProviderProtocol,
 )
+from utils.storage.mega_provider import MegaStorageProvider
 
 __all__ = [
     "StorageProvider",
     "StorageFileInfo",
     "SyncResult",
     "StorageProviderProtocol",
+    "MegaStorageProvider",
 ]
