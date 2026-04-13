@@ -4,9 +4,10 @@ import configparser
 
 import praw
 
+from utils.config_paths import get_settings_file_path
 from utils.config_validator import validate_configuration
 from utils.env_config import load_config_and_env
-from utils.feature_flags import get_feature_summary, get_settings_file_path
+from utils.feature_flags import get_feature_summary
 from utils.file_operations import save_user_activity
 from utils.file_path_validate import validate_and_set_directory
 from utils.gdpr_processor import process_gdpr_export
