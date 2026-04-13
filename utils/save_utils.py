@@ -3,7 +3,6 @@ from __future__ import annotations
 import html
 import logging
 import os
-import re
 import threading
 import urllib3
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,16 +19,15 @@ from utils.praw_helpers import RecoveredItem, create_recovery_metadata_markdown
 from utils.time_utilities import lazy_load_comments
 
 logger = logging.getLogger(__name__)
+
 _media_size_local = threading.local()
 
 
 def format_date(timestamp):
-    """Format a UTC timestamp into a human-readable date."""
     return datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def extract_video_id(url):
-    """Extract the video ID from a YouTube URL."""
     if not url:
         return None
     if "youtube.com" in url:
@@ -56,7 +54,6 @@ def _normalize_url(url: str) -> str:
 
 
 def _is_gif_url(url):
-    """Check if a URL points to a true GIF resource."""
     if not url:
         return False
     try:
@@ -68,7 +65,6 @@ def _is_gif_url(url):
 
 
 def _is_image_url(url):
-    """Check if a URL points to a downloadable image."""
     if not url or _is_gif_url(url):
         return False
     try:
@@ -99,7 +95,6 @@ def _is_image_url(url):
 
 
 def _is_video_url(url):
-    """Check if a URL points to a Reddit video."""
     if not url:
         return False
     try:
@@ -109,6 +104,8 @@ def _is_video_url(url):
             "v.redd.it" in domain
             or parsed.path.lower().endswith(".mp4")
             or parsed.path.lower().endswith(".webm")
+            or parsed.path.lower().endswith(".m3u8")
+            or parsed.path.lower().endswith(".mpd")
         )
     except Exception:
         return False
@@ -116,10 +113,10 @@ def _is_video_url(url):
 
 def _extract_reddit_video_url(submission) -> Optional[str]:
     """
-    Prefer audio-capable Reddit video sources first.
+    Prefer the richest Reddit video source first.
 
-    fallback_url is the no-audio MP4. dash_url / hls_url are what yt-dlp can
-    use to merge audio when the source actually has it.
+    Reddit developers note that fallback_url is the video-only stream, while
+    dash_url / hls_url are the sources that can carry audio.
     """
     url = _normalize_url(getattr(submission, "url", "") or "")
 
@@ -147,7 +144,7 @@ def _extract_reddit_video_url(submission) -> Optional[str]:
         if "v.redd.it" in parsed.netloc:
             video_id = parsed.path.strip("/")
             if video_id:
-                return f"https://v.redd.it/{video_id}/DASH_720.mp4"
+                return f"https://v.redd.it/{video_id}/DASHPlaylist.mpd"
     except Exception:
         pass
 
@@ -156,7 +153,7 @@ def _extract_reddit_video_url(submission) -> Optional[str]:
 
 def _extract_reddit_gif_url(submission) -> Optional[str]:
     """
-    Reddit GIFs are often exposed through preview metadata instead of a plain .gif URL.
+    True GIFs are usually direct .gif/.gifv files or preview variants.
     """
     preview = getattr(submission, "preview", None)
     if not preview:
@@ -226,29 +223,27 @@ def _is_video_like_submission(submission):
 
 
 def _get_video_download_url(submission):
-    """Extract the actual video stream URL from a PRAW submission."""
     return _extract_reddit_video_url(submission) or getattr(submission, "url", None)
 
 
 def _track_media_size(size):
-    """Track accumulated media download sizes per-thread."""
     if not hasattr(_media_size_local, "size"):
         _media_size_local.size = 0
     _media_size_local.size += size
 
 
 def _reset_media_tracker():
-    """Reset the per-thread media size tracker to zero."""
     _media_size_local.size = 0
 
 
 def _get_media_size():
-    """Get the accumulated media size for the current thread."""
     return getattr(_media_size_local, "size", 0)
 
 
 def _download_image_fallback(image_url, save_directory, submission_id, ignore_tls_errors=None):
-    """Fallback to a direct requests download when the media helper fails."""
+    """
+    Fallback direct requests download when the media helper fails.
+    """
     try:
         if ignore_tls_errors is None:
             ignore_tls_errors = get_ignore_tls_errors()
@@ -266,6 +261,8 @@ def _download_image_fallback(image_url, save_directory, submission_id, ignore_tl
             extension = ".gif"
         elif "video" in content_type or "mp4" in content_type or "webm" in content_type:
             extension = ".mp4"
+        elif "html" in content_type:
+            extension = ".html"
         else:
             extension = os.path.splitext(urlparse(image_url).path)[1]
             if extension.lower() not in [
@@ -302,7 +299,9 @@ def _download_image_fallback(image_url, save_directory, submission_id, ignore_tl
 
 
 def download_image(image_url, save_directory, submission_id, ignore_tls_errors=None):
-    """Download a media file and save it locally."""
+    """
+    Download a media file and save it locally.
+    """
     try:
         from .media_download_manager import download_media_file
 
@@ -327,7 +326,9 @@ def download_image(image_url, save_directory, submission_id, ignore_tls_errors=N
 
 
 def _save_submission_media(submission, f, is_recovered, media_config, save_dir, ignore_tls_errors, context_mode):
-    """Handle media detection and download for a submission's link post."""
+    """
+    Handle media detection and download for a submission's link post.
+    """
     # 1. Gallery posts
     if (
         not is_recovered
@@ -466,7 +467,9 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
 
 
 def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None, context_mode=False):
-    """Save a submission and its metadata, optionally unsaving it after."""
+    """
+    Save a submission and its metadata, optionally unsaving it after.
+    """
     try:
         is_recovered = isinstance(submission, RecoveredItem)
 
@@ -545,7 +548,9 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
 
 
 def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None):
-    """Save a comment, its context, and any child comments."""
+    """
+    Save a comment, its context, and any child comments.
+    """
     try:
         is_recovered = isinstance(comment, RecoveredItem)
 
@@ -607,7 +612,9 @@ def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, r
 
 
 def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_errors=None):
-    """Process all comments using pure blockquote nesting for hierarchy."""
+    """
+    Process all comments using pure blockquote nesting for hierarchy.
+    """
     for comment in comments:
         if isinstance(comment, Comment):
             bq = "> " * depth if depth > 0 else ""
