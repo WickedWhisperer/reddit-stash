@@ -1,8 +1,7 @@
-"""
-Feature flags module for Reddit Stash media downloads.
+"""Feature flags module for Reddit Stash media downloads.
 
-This module provides a clean interface for checking feature flags and loading
-media-related configuration with proper fallbacks and validation.
+This module provides a clean interface for checking feature flags and
+loading media-related configuration with proper fallbacks and validation.
 """
 
 import configparser
@@ -29,33 +28,45 @@ class MediaFeatureConfig:
 
     def is_images_enabled(self) -> bool:
         """Check if image downloads are enabled."""
-        return (self.is_media_enabled() and
-                self.config_parser.getboolean('Media', 'download_images', fallback=True))
+        return (
+            self.is_media_enabled()
+            and self.config_parser.getboolean('Media', 'download_images', fallback=True)
+        )
 
     def is_gifs_enabled(self) -> bool:
         """Check if GIF downloads are enabled."""
-        return (self.is_media_enabled() and
-                self.config_parser.getboolean('Media', 'download_gifs', fallback=True))
+        return (
+            self.is_media_enabled()
+            and self.config_parser.getboolean('Media', 'download_gifs', fallback=True)
+        )
 
     def is_videos_enabled(self) -> bool:
         """Check if video downloads are enabled."""
-        return (self.is_media_enabled() and
-                self.config_parser.getboolean('Media', 'download_videos', fallback=True))
+        return (
+            self.is_media_enabled()
+            and self.config_parser.getboolean('Media', 'download_videos', fallback=True)
+        )
 
     def is_audio_enabled(self) -> bool:
         """Check if audio downloads are enabled."""
-        return (self.is_media_enabled() and
-                self.config_parser.getboolean('Media', 'download_audio', fallback=True))
+        return (
+            self.is_media_enabled()
+            and self.config_parser.getboolean('Media', 'download_audio', fallback=True)
+        )
 
     def is_albums_enabled(self) -> bool:
         """Check if album downloads are enabled."""
-        return (self.is_media_enabled() and
-                self.config_parser.getboolean('Media', 'download_albums', fallback=True))
+        return (
+            self.is_media_enabled()
+            and self.config_parser.getboolean('Media', 'download_albums', fallback=True)
+        )
 
     def is_thumbnails_enabled(self) -> bool:
         """Check if thumbnail generation is enabled."""
-        return (self.is_media_enabled() and
-                self.config_parser.getboolean('Media', 'create_thumbnails', fallback=True))
+        return (
+            self.is_media_enabled()
+            and self.config_parser.getboolean('Media', 'create_thumbnails', fallback=True)
+        )
 
     def get_media_config(self) -> Dict[str, Any]:
         """Get all media configuration as a dictionary."""
@@ -98,7 +109,7 @@ class MediaFeatureConfig:
 
         client_ids_str = self.config_parser.get('Imgur', 'client_ids', fallback='None')
         if client_ids_str and client_ids_str.lower() != 'none':
-            config['client_ids'] = [id.strip() for id in client_ids_str.split(',') if id.strip()]
+            config['client_ids'] = [cid.strip() for cid in client_ids_str.split(',') if cid.strip()]
 
         client_secrets_str = self.config_parser.get('Imgur', 'client_secrets', fallback='None')
         if client_secrets_str and client_secrets_str.lower() != 'none':
@@ -131,10 +142,8 @@ class MediaFeatureConfig:
 
         if config['max_image_size'] <= 0:
             return "max_image_size must be greater than 0"
-
         if config['max_video_size'] <= 0:
             return "max_video_size must be greater than 0"
-
         if config['thumbnail_size'] <= 0:
             return "thumbnail_size must be greater than 0"
 
@@ -143,34 +152,30 @@ class MediaFeatureConfig:
 
         if config['max_concurrent_downloads'] <= 0:
             return "max_concurrent_downloads must be greater than 0"
-
         if config['download_timeout'] <= 0:
             return "download_timeout must be greater than 0"
-
         if config['max_daily_storage_mb'] <= 0:
             return "max_daily_storage_mb must be greater than 0"
 
         if config['video_quality'] not in ['high', 'low']:
             return "video_quality must be 'high' or 'low'"
 
-        recovery_config = self.get_recovery_config()
-        if recovery_config['timeout_seconds'] <= 0:
-            return "Recovery timeout_seconds must be greater than 0"
-
-        if recovery_config['cache_duration_hours'] <= 0:
-            return "Recovery cache_duration_hours must be greater than 0"
-
-        # Validate bool parsing for GIFs
         try:
             self.config_parser.getboolean('Media', 'download_gifs', fallback=True)
         except ValueError:
             return "download_gifs must be true or false"
 
+        recovery_config = self.get_recovery_config()
+        if recovery_config['timeout_seconds'] <= 0:
+            return "Recovery timeout_seconds must be greater than 0"
+        if recovery_config['cache_duration_hours'] <= 0:
+            return "Recovery cache_duration_hours must be greater than 0"
+
         return None
 
 
-# Global instance for easy access
 _media_config = None
+
 
 def get_media_config() -> MediaFeatureConfig:
     """Get the global media configuration instance."""
@@ -179,13 +184,16 @@ def get_media_config() -> MediaFeatureConfig:
         _media_config = MediaFeatureConfig()
     return _media_config
 
+
 def is_media_enabled() -> bool:
     """Quick check if media downloads are enabled globally."""
     return get_media_config().is_media_enabled()
 
+
 def validate_media_config() -> Optional[str]:
     """Validate media configuration and return error if invalid."""
     return get_media_config().validate_config()
+
 
 def get_storage_summary() -> str:
     """Get a summary of cloud storage configuration."""
@@ -220,7 +228,6 @@ def get_storage_summary() -> str:
 def get_feature_summary() -> str:
     """Get a summary of enabled features for logging/debugging."""
     config = get_media_config()
-
     parts = []
 
     if not config.is_media_enabled():
@@ -239,9 +246,8 @@ def get_feature_summary() -> str:
             features.append("albums")
         if config.is_thumbnails_enabled():
             features.append("thumbnails")
+
         parts.append(f"Media downloads: ENABLED ({', '.join(features)})")
 
     parts.append(get_storage_summary())
-
     return "\n".join(parts)
-    
