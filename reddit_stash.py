@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import configparser
-import os
 
 import praw
 
@@ -27,7 +26,6 @@ def _load_runtime_config() -> configparser.ConfigParser:
 
 def _build_reddit_client() -> praw.Reddit:
     client_id, client_secret, username, password = load_config_and_env()
-
     return praw.Reddit(
         client_id=client_id,
         client_secret=client_secret,
