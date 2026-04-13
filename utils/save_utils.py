@@ -109,6 +109,18 @@ def _download_image_fallback(image_url, save_directory, submission_id, ignore_tl
         return None, 0
 
 
+
+def _is_gif_url(url):
+    """Check if a URL points to a GIF resource."""
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        return path.endswith('.gif')
+    except Exception:
+        return False
+
 def _is_image_url(url):
     """Check if a URL points to a downloadable image."""
     if not url:
@@ -119,7 +131,7 @@ def _is_image_url(url):
         path = parsed.path.lower()
 
         # Direct image extensions (including .webp)
-        image_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff')
+        image_extensions = ('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff')
         if path.endswith(image_extensions):
             return True
         # Check extension before query params
@@ -296,12 +308,12 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
         else:
             f.write(f"![Image]({submission.url})\n")
 
-    # --- 4. YouTube ---
+    # --- 5. YouTube ---
     elif "youtube.com" in submission.url or "youtu.be" in submission.url:
         video_id = extract_video_id(submission.url)
         f.write(f"[![Video](https://img.youtube.com/vi/{video_id}/0.jpg)]({submission.url})")
 
-    # --- 5. Everything else (plain URL) ---
+    # --- 6. Everything else (plain URL) ---
     else:
         f.write(submission.url if submission.url else '[Deleted Post]')
 
