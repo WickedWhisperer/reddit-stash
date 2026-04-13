@@ -15,6 +15,8 @@ jobs:
   run-script:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    env:
+      SETTINGS_FILE: settings.ini
 
     steps:
       - name: Checkout repository
@@ -35,7 +37,7 @@ jobs:
       - name: Verify critical scripts exist
         run: |
           missing=0
-          for script in reddit_stash.py dropbox_utils.py storage_utils.py; do
+          for script in reddit_stash.py storage_utils.py; do
             if [ ! -f "$script" ]; then
               echo "::error::Missing critical script: $script"
               missing=$((missing + 1))
@@ -87,11 +89,11 @@ jobs:
           fi
           echo "Using storage provider: $(cat $GITHUB_OUTPUT | grep provider | cut -d= -f2)"
 
-      - name: Download from Dropbox
+      - name: Download from storage
         if: steps.storage.outputs.provider != 's3'
         timeout-minutes: 2
         env:
-          STORAGE_PROVIDER: dropbox
+          STORAGE_PROVIDER: ${{ steps.storage.outputs.provider }}
           DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
           DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
           DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
@@ -102,7 +104,7 @@ jobs:
         if: steps.storage.outputs.provider == 's3'
         run: pip install -r requirements-s3.txt
 
-      - name: Download from S3
+      - name: Download from storage
         if: steps.storage.outputs.provider == 's3'
         timeout-minutes: 5
         env:
@@ -118,29 +120,29 @@ jobs:
       - name: Run Reddit Stash Script
         timeout-minutes: 90
         env:
+          STORAGE_PROVIDER: ${{ steps.storage.outputs.provider }}
           REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
           REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
           REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
           IMGUR_CLIENT_IDS: ${{ secrets.IMGUR_CLIENT_IDS }}
-          STORAGE_PROVIDER: ${{ secrets.STORAGE_PROVIDER }}
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
           S3_STORAGE_CLASS: ${{ secrets.S3_STORAGE_CLASS }}
         run: |
           python reddit_stash.py
 
-      - name: Upload to Dropbox
+      - name: Upload to storage
         if: steps.storage.outputs.provider != 's3'
         timeout-minutes: 50
         env:
-          STORAGE_PROVIDER: dropbox
+          STORAGE_PROVIDER: ${{ steps.storage.outputs.provider }}
           DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
           DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
           DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
         run: |
           python storage_utils.py --upload
 
-      - name: Upload to S3
+      - name: Upload to storage
         if: steps.storage.outputs.provider == 's3'
         timeout-minutes: 50
         env:
@@ -152,3 +154,4 @@ jobs:
           S3_STORAGE_CLASS: ${{ secrets.S3_STORAGE_CLASS }}
         run: |
           python storage_utils.py --upload
+          
