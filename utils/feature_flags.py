@@ -5,9 +5,10 @@ This module provides a clean interface for checking feature flags and loading
 media-related configuration with proper fallbacks and validation.
 """
 
-import os
 import configparser
 from typing import Dict, Any, Optional
+
+from .config_paths import get_settings_file_path
 
 
 class MediaFeatureConfig:
@@ -18,12 +19,8 @@ class MediaFeatureConfig:
         self._load_config()
 
     def _load_config(self):
-        """Load configuration from settings.ini."""
-        # Dynamically determine the path to the root directory
-        BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        config_file_path = os.path.join(BASE_DIR, 'settings.ini')
-
-        # Read the settings.ini file
+        """Load configuration from settings.ini (or SETTINGS_FILE)."""
+        config_file_path = get_settings_file_path()
         self.config_parser.read(config_file_path)
 
     def is_media_enabled(self) -> bool:
@@ -34,6 +31,11 @@ class MediaFeatureConfig:
         """Check if image downloads are enabled."""
         return (self.is_media_enabled() and
                 self.config_parser.getboolean('Media', 'download_images', fallback=True))
+
+    def is_gifs_enabled(self) -> bool:
+        """Check if GIF downloads are enabled."""
+        return (self.is_media_enabled() and
+                self.config_parser.getboolean('Media', 'download_gifs', fallback=True))
 
     def is_videos_enabled(self) -> bool:
         """Check if video downloads are enabled."""
@@ -63,6 +65,7 @@ class MediaFeatureConfig:
         return {
             'media_enabled': True,
             'images_enabled': self.is_images_enabled(),
+            'gifs_enabled': self.is_gifs_enabled(),
             'videos_enabled': self.is_videos_enabled(),
             'audio_enabled': self.is_audio_enabled(),
             'albums_enabled': self.is_albums_enabled(),
@@ -70,11 +73,11 @@ class MediaFeatureConfig:
 
             # Image settings
             'thumbnail_size': self.config_parser.getint('Media', 'thumbnail_size', fallback=800),
-            'max_image_size': self.config_parser.getint('Media', 'max_image_size', fallback=5368709120),  # 5MB
+            'max_image_size': self.config_parser.getint('Media', 'max_image_size', fallback=5368709120),
 
             # Video settings
             'video_quality': self.config_parser.get('Media', 'video_quality', fallback='high'),
-            'max_video_size': self.config_parser.getint('Media', 'max_video_size', fallback=5368709120),  # 200MB
+            'max_video_size': self.config_parser.getint('Media', 'max_video_size', fallback=5368709120),
 
             # Album settings
             'max_album_images': self.config_parser.getint('Media', 'max_album_images', fallback=50),
@@ -93,12 +96,10 @@ class MediaFeatureConfig:
             'client_secrets': None,
         }
 
-        # Handle client IDs (comma-separated list)
         client_ids_str = self.config_parser.get('Imgur', 'client_ids', fallback='None')
         if client_ids_str and client_ids_str.lower() != 'none':
             config['client_ids'] = [id.strip() for id in client_ids_str.split(',') if id.strip()]
 
-        # Handle client secrets (comma-separated list)
         client_secrets_str = self.config_parser.get('Imgur', 'client_secrets', fallback='None')
         if client_secrets_str and client_secrets_str.lower() != 'none':
             config['client_secrets'] = [secret.strip() for secret in client_secrets_str.split(',') if secret.strip()]
@@ -124,11 +125,10 @@ class MediaFeatureConfig:
             None if config is valid, error message string if invalid.
         """
         if not self.is_media_enabled():
-            return None  # No validation needed if media is disabled
+            return None
 
         config = self.get_media_config()
 
-        # Validate size limits
         if config['max_image_size'] <= 0:
             return "max_image_size must be greater than 0"
 
@@ -138,11 +138,9 @@ class MediaFeatureConfig:
         if config['thumbnail_size'] <= 0:
             return "thumbnail_size must be greater than 0"
 
-        # Validate album limits
         if config['max_album_images'] < 0:
             return "max_album_images must be 0 (unlimited) or positive"
 
-        # Validate performance settings
         if config['max_concurrent_downloads'] <= 0:
             return "max_concurrent_downloads must be greater than 0"
 
@@ -152,7 +150,6 @@ class MediaFeatureConfig:
         if config['max_daily_storage_mb'] <= 0:
             return "max_daily_storage_mb must be greater than 0"
 
-        # Validate video quality
         if config['video_quality'] not in ['high', 'low']:
             return "video_quality must be 'high' or 'low'"
 
@@ -162,6 +159,12 @@ class MediaFeatureConfig:
 
         if recovery_config['cache_duration_hours'] <= 0:
             return "Recovery cache_duration_hours must be greater than 0"
+
+        # Validate bool parsing for GIFs
+        try:
+            self.config_parser.getboolean('Media', 'download_gifs', fallback=True)
+        except ValueError:
+            return "download_gifs must be true or false"
 
         return None
 
@@ -206,6 +209,9 @@ def get_storage_summary() -> str:
             parts.append(")")
             return "".join(parts)
 
+        if config.provider == StorageProvider.MEGA:
+            return f"Cloud storage: MEGA ({config.dropbox_directory})"
+
         return f"Cloud storage: {config.provider.value}"
     except Exception:
         return "Cloud storage: NOT CONFIGURED"
@@ -223,6 +229,8 @@ def get_feature_summary() -> str:
         features = []
         if config.is_images_enabled():
             features.append("images")
+        if config.is_gifs_enabled():
+            features.append("gifs")
         if config.is_videos_enabled():
             features.append("videos")
         if config.is_audio_enabled():
@@ -236,3 +244,4 @@ def get_feature_summary() -> str:
     parts.append(get_storage_summary())
 
     return "\n".join(parts)
+    
