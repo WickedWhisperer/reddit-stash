@@ -605,7 +605,7 @@ class RedditMediaDownloader(BaseHTTPDownloader):
                     _logger.debug(f"Found audio track via fallback filename: {audio_filename}")
                     return audio_url
 
-            _logger.debug(f"No audio track found for video: {video_url}")
+            _logger.warning(f"No audio track found for video: {video_url}")
             return None
 
         except Exception:
@@ -840,4 +840,5 @@ class RedditMediaDownloader(BaseHTTPDownloader):
             logging.getLogger(__name__).warning(f"Error extracting media URLs from submission: {e}")
 
         return media_urls
-                
+
+        
