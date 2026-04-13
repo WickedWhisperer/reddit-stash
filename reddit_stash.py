@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import configparser
+
 import praw
 
 from utils.config_paths import get_settings_file_path
@@ -11,63 +14,72 @@ from utils.gdpr_processor import process_gdpr_export
 from utils.log_utils import load_file_log, save_file_log
 
 
-def main():
-    # Validate configuration before proceeding
+def _load_runtime_config() -> configparser.ConfigParser:
+    """Load the active settings file chosen by SETTINGS_FILE or the default."""
+    config = configparser.ConfigParser()
+    settings_path = get_settings_file_path()
+
+    read_files = config.read(settings_path)
+    if not read_files:
+        raise FileNotFoundError(f"Configuration file not found: {settings_path}")
+
+    return config
+
+
+def _build_reddit_client():
+    """Create a PRAW client from environment variables and/or config values."""
+    client_id, client_secret, username, password = load_config_and_env()
+    return praw.Reddit(
+        client_id=client_id,
+        client_secret=client_secret,
+        username=username,
+        password=password,
+        user_agent=f"Reddit Saved Saver by /u/{username}",
+    )
+
+
+def main() -> None:
     print("Validating configuration...")
 
     try:
         validation_result = validate_configuration()
 
-        # Print warnings if any
-        if validation_result["warnings"]:
+        warnings = validation_result.get("warnings", [])
+        if warnings:
             print("\nConfiguration Warnings:")
-            for warning in validation_result["warnings"]:
+            for warning in warnings:
                 print(f"⚠ {warning}")
 
         print("✅ Configuration validated successfully")
         print(get_feature_summary())
-
-    except Exception as e:
-        print(f"❌ Configuration validation failed: {e}")
-        print("\nFor detailed configuration information, check your settings.ini file.")
+    except Exception as exc:
+        print(f"❌ Configuration validation failed: {exc}")
+        print(f"\nFor detailed configuration information, check: {get_settings_file_path()}")
         return
 
-    # Load configuration
-    config_parser = configparser.ConfigParser()
-    config_parser.read(get_settings_file_path())
+    try:
+        config_parser = _load_runtime_config()
+    except Exception as exc:
+        print(f"❌ Failed to load configuration: {exc}")
+        return
 
-    # Fetch settings
     unsave_setting = config_parser.getboolean("Settings", "unsave_after_download", fallback=False)
     save_directory = config_parser.get("Settings", "save_directory", fallback="reddit/")
     process_api = config_parser.getboolean("Settings", "process_api", fallback=True)
     process_gdpr = config_parser.getboolean("Settings", "process_gdpr", fallback=False)
 
-    # Validate directory
     save_directory = validate_and_set_directory(save_directory)
 
-    # Initialize Reddit API connection (only if API processing is needed)
     reddit = None
-
     if process_api:
-        client_id, client_secret, username, password = load_config_and_env()
-        reddit = praw.Reddit(
-            client_id=client_id,
-            client_secret=client_secret,
-            username=username,
-            password=password,
-            user_agent=f"Reddit Saved Saver by /u/{username}",
-        )
-    elif process_gdpr:
-        # Try to load credentials for GDPR enrichment, but don't fail if missing
         try:
-            client_id, client_secret, username, password = load_config_and_env()
-            reddit = praw.Reddit(
-                client_id=client_id,
-                client_secret=client_secret,
-                username=username,
-                password=password,
-                user_agent=f"Reddit Saved Saver by /u/{username}",
-            )
+            reddit = _build_reddit_client()
+        except Exception as exc:
+            print(f"❌ Failed to initialize Reddit API client: {exc}")
+            return
+    elif process_gdpr:
+        try:
+            reddit = _build_reddit_client()
         except Exception:
             print("No API credentials available. GDPR export will run in CSV-only mode.")
             reddit = None
@@ -76,56 +88,44 @@ def main():
         print("Both process_api and process_gdpr are disabled. Nothing to do.")
         return
 
-    # Load the log file
     file_log = load_file_log(save_directory)
 
-    # Initialize counters for processed statistics
     total_processed = 0
     total_skipped = 0
     total_size = 0
     total_media_size = 0
 
-    # Process API accessible items
     if process_api:
         print("Processing items from Reddit API...")
         api_stats = save_user_activity(reddit, save_directory, file_log, unsave=unsave_setting)
-        total_processed = api_stats[0]
-        total_skipped = api_stats[1]
-        total_size = api_stats[2]
-        total_media_size = api_stats[3] if len(api_stats) > 3 else 0
+        total_processed += api_stats[0]
+        total_skipped += api_stats[1]
+        total_size += api_stats[2]
+        if len(api_stats) > 3:
+            total_media_size += api_stats[3]
 
-    # Process GDPR export if enabled (works with or without API credentials)
     if process_gdpr:
-        existing_files = set(file_log.keys())
-        created_dirs_cache = set()
-
         print("\nProcessing GDPR export data...")
         gdpr_stats = process_gdpr_export(
             reddit,
             save_directory,
-            existing_files,
-            created_dirs_cache,
+            set(file_log.keys()),
+            set(),
             file_log,
         )
         total_processed += gdpr_stats[0]
         total_skipped += gdpr_stats[1]
         total_size += gdpr_stats[2]
-        # GDPR processing currently doesn't track media downloads separately
 
-    # Final save of file log to persist any remaining batched entries
     save_file_log(file_log, save_directory)
 
-    # Print final statistics with separate storage reporting
     print(
         f"\nProcessing completed. {total_processed} items processed, "
         f"{total_skipped} items skipped."
     )
     print(f"Markdown file storage: {total_size / (1024 * 1024):.2f} MB")
     print(f"Media file storage: {total_media_size / (1024 * 1024):.2f} MB")
-    print(
-        f"Total combined storage: "
-        f"{(total_size + total_media_size) / (1024 * 1024):.2f} MB"
-    )
+    print(f"Total combined storage: {(total_size + total_media_size) / (1024 * 1024):.2f} MB")
 
 
 if __name__ == "__main__":
