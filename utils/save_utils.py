@@ -20,7 +20,6 @@ from utils.praw_helpers import RecoveredItem, create_recovery_metadata_markdown
 from utils.time_utilities import lazy_load_comments
 
 logger = logging.getLogger(__name__)
-
 _media_size_local = threading.local()
 
 
@@ -106,42 +105,42 @@ def _is_video_url(url):
     try:
         parsed = urlparse(url)
         domain = parsed.netloc.lower()
-        return "v.redd.it" in domain or parsed.path.lower().endswith(".mp4") or parsed.path.lower().endswith(".webm")
+        return (
+            "v.redd.it" in domain
+            or parsed.path.lower().endswith(".mp4")
+            or parsed.path.lower().endswith(".webm")
+        )
     except Exception:
         return False
 
 
 def _extract_reddit_video_url(submission) -> Optional[str]:
+    """
+    Prefer audio-capable Reddit video sources first.
+
+    fallback_url is the no-audio MP4. dash_url / hls_url are what yt-dlp can
+    use to merge audio when the source actually has it.
+    """
     url = _normalize_url(getattr(submission, "url", "") or "")
 
     for media_attr in ("media", "secure_media"):
         media = getattr(submission, media_attr, None)
         if media:
-            fallback_url = _nested_get(media, "reddit_video", "fallback_url")
-            if fallback_url:
-                return _normalize_url(fallback_url)
-
-            dash_url = _nested_get(media, "reddit_video", "dash_url")
-            if dash_url:
-                return _normalize_url(dash_url)
-
-            hls_url = _nested_get(media, "reddit_video", "hls_url")
-            if hls_url:
-                return _normalize_url(hls_url)
+            reddit_video = _nested_get(media, "reddit_video")
+            if isinstance(reddit_video, dict):
+                for key in ("dash_url", "hls_url", "fallback_url"):
+                    candidate = reddit_video.get(key)
+                    if candidate:
+                        return _normalize_url(candidate)
 
     preview = getattr(submission, "preview", None)
     if preview:
-        fallback_url = _nested_get(preview, "reddit_video_preview", "fallback_url")
-        if fallback_url:
-            return _normalize_url(fallback_url)
-
-        dash_url = _nested_get(preview, "reddit_video_preview", "dash_url")
-        if dash_url:
-            return _normalize_url(dash_url)
-
-        hls_url = _nested_get(preview, "reddit_video_preview", "hls_url")
-        if hls_url:
-            return _normalize_url(hls_url)
+        reddit_video_preview = _nested_get(preview, "reddit_video_preview")
+        if isinstance(reddit_video_preview, dict):
+            for key in ("dash_url", "hls_url", "fallback_url"):
+                candidate = reddit_video_preview.get(key)
+                if candidate:
+                    return _normalize_url(candidate)
 
     try:
         parsed = urlparse(url)
@@ -227,9 +226,7 @@ def _is_video_like_submission(submission):
 
 
 def _get_video_download_url(submission):
-    """
-    Extract the actual video stream URL from a PRAW submission.
-    """
+    """Extract the actual video stream URL from a PRAW submission."""
     return _extract_reddit_video_url(submission) or getattr(submission, "url", None)
 
 
@@ -251,7 +248,7 @@ def _get_media_size():
 
 
 def _download_image_fallback(image_url, save_directory, submission_id, ignore_tls_errors=None):
-    """Fallback to the original download method for backward compatibility."""
+    """Fallback to a direct requests download when the media helper fails."""
     try:
         if ignore_tls_errors is None:
             ignore_tls_errors = get_ignore_tls_errors()
@@ -271,7 +268,18 @@ def _download_image_fallback(image_url, save_directory, submission_id, ignore_tl
             extension = ".mp4"
         else:
             extension = os.path.splitext(urlparse(image_url).path)[1]
-            if extension.lower() not in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".mp4", ".webm", ".mov"]:
+            if extension.lower() not in [
+                ".jpg",
+                ".jpeg",
+                ".png",
+                ".gif",
+                ".webp",
+                ".bmp",
+                ".tiff",
+                ".mp4",
+                ".webm",
+                ".mov",
+            ]:
                 extension = ".jpg"
 
         image_filename = f"{submission_id}{extension}"
@@ -327,7 +335,6 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
         and submission.is_gallery
         and media_config.is_albums_enabled()
     ):
-        media_urls = getattr(submission, "media_metadata", None) or {}
         try:
             from .media_services.reddit_media import RedditMediaDownloader
 
@@ -601,7 +608,7 @@ def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, r
 
 def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_errors=None):
     """Process all comments using pure blockquote nesting for hierarchy."""
-    for i, comment in enumerate(comments):
+    for comment in comments:
         if isinstance(comment, Comment):
             bq = "> " * depth if depth > 0 else ""
             author = comment.author.name if comment.author else "[deleted]"
@@ -622,7 +629,7 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
                         image_url = potential_url
 
             if gif_url:
-                body_before_url = comment_body[:comment_body.rfind(gif_url)].strip()
+                body_before_url = comment_body[: comment_body.rfind(gif_url)].strip()
                 if body_before_url:
                     for line in body_before_url.split("\n"):
                         f.write(f"{bq}{line}\n")
@@ -636,7 +643,7 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
                 else:
                     f.write(f"{bq}![GIF]({gif_url})\n\n")
             elif image_url:
-                body_before_url = comment_body[:comment_body.rfind(image_url)].strip()
+                body_before_url = comment_body[: comment_body.rfind(image_url)].strip()
                 if body_before_url:
                     for line in body_before_url.split("\n"):
                         f.write(f"{bq}{line}\n")
