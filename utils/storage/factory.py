@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import configparser
 import os
-import warnings
 from dataclasses import dataclass
 from typing import Optional
 
+from utils.config_paths import get_settings_file_path
 from utils.storage.base import StorageProvider
 
 _INVALID = (None, "", "None")
@@ -30,10 +30,9 @@ class StorageConfig:
 
 
 def load_storage_config() -> StorageConfig:
-    """Load storage configuration from settings.ini with env var overrides."""
+    """Load storage configuration from settings.ini or SETTINGS_FILE with env var overrides."""
     parser = configparser.ConfigParser()
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    parser.read(os.path.join(base_dir, "settings.ini"))
+    parser.read(get_settings_file_path())
 
     def _get(section: str, key: str, fallback: Optional[str] = None) -> Optional[str]:
         val = parser.get(section, key, fallback=fallback)
