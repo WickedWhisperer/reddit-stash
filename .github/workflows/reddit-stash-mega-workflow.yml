@@ -15,6 +15,8 @@ jobs:
   run-script:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    env:
+      SETTINGS_FILE: mega_settings.ini
 
     steps:
       - name: Checkout repository
@@ -35,7 +37,7 @@ jobs:
       - name: Verify critical scripts exist
         run: |
           missing=0
-          for script in reddit_stash.py dropbox_utils.py storage_utils.py; do
+          for script in reddit_stash.py storage_utils.py; do
             if [ ! -f "$script" ]; then
               echo "::error::Missing critical script: $script"
               missing=$((missing + 1))
@@ -79,38 +81,26 @@ jobs:
         run: |
           curl https://rclone.org/install.sh | sudo bash
 
-      - name: Apply MEGA settings
-        run: |
-          cp mega_settings.ini settings.ini
-
-      - name: Download from MEGA
+      - name: Run Reddit Stash Script
         timeout-minutes: 90
         env:
           STORAGE_PROVIDER: mega
           MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
           MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
-        run: |
-          python storage_utils.py --download
-
-      - name: Run Reddit Stash Script
-        timeout-minutes: 90
-        env:
-          STORAGE_PROVIDER: mega
           REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
           REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
           REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
           IMGUR_CLIENT_IDS: ${{ secrets.IMGUR_CLIENT_IDS }}
-          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
-          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
         run: |
+          python storage_utils.py --download
           python reddit_stash.py
 
-      - name: Upload to MEGA
-        timeout-minutes: 90
+      - name: Upload updated archive to MEGA
         env:
           STORAGE_PROVIDER: mega
           MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
           MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
         run: |
           python storage_utils.py --upload
+          
