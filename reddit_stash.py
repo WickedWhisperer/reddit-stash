@@ -15,7 +15,10 @@ from utils.log_utils import load_file_log, save_file_log
 
 
 def _load_runtime_config() -> configparser.ConfigParser:
-    """Load the active settings file chosen by SETTINGS_FILE or the default."""
+    """
+    Load the active settings file selected by SETTINGS_FILE, falling back to
+    the project default when the environment variable is not set.
+    """
     config = configparser.ConfigParser()
     settings_path = get_settings_file_path()
 
@@ -26,8 +29,7 @@ def _load_runtime_config() -> configparser.ConfigParser:
     return config
 
 
-def _build_reddit_client():
-    """Create a PRAW client from environment variables and/or config values."""
+def _build_reddit_client() -> praw.Reddit:
     client_id, client_secret, username, password = load_config_and_env()
     return praw.Reddit(
         client_id=client_id,
@@ -52,6 +54,7 @@ def main() -> None:
 
         print("✅ Configuration validated successfully")
         print(get_feature_summary())
+
     except Exception as exc:
         print(f"❌ Configuration validation failed: {exc}")
         print(f"\nFor detailed configuration information, check: {get_settings_file_path()}")
