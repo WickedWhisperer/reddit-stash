@@ -22,37 +22,6 @@ def _load_check_type() -> str:
     return parser.get("Settings", "check_type", fallback="DIR").upper()
 
 
-def _get_provider_for_name(name: str):
-    config = load_storage_config()
-
-    if name == "dropbox":
-        from utils.storage.dropbox_provider import DropboxStorageProvider
-
-        return DropboxStorageProvider(dropbox_directory=config.dropbox_directory)
-
-    if name == "s3":
-        if not config.s3_bucket:
-            print("Error: S3 bucket not configured.")
-            sys.exit(1)
-
-        from utils.storage.s3_provider import S3StorageProvider
-
-        return S3StorageProvider(
-            bucket=config.s3_bucket,
-            region=config.s3_region,
-            storage_class=config.s3_storage_class,
-            endpoint_url=config.s3_endpoint_url,
-        )
-
-    if name == "mega":
-        from utils.storage.mega_provider import MegaStorageProvider
-
-        return MegaStorageProvider()
-
-    print(f"Error: Unknown provider '{name}'. Must be 'dropbox', 's3' or 'mega'.")
-    sys.exit(1)
-
-
 def _get_remote_directory(provider_name: str) -> str:
     config = load_storage_config()
 
