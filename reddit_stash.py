@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import configparser
+import os
 
 import praw
 
-from utils.config_paths import get_settings_file_path
 from utils.config_validator import validate_configuration
 from utils.env_config import load_config_and_env
-from utils.feature_flags import get_feature_summary
+from utils.feature_flags import get_feature_summary, get_settings_file_path
 from utils.file_operations import save_user_activity
 from utils.file_path_validate import validate_and_set_directory
 from utils.gdpr_processor import process_gdpr_export
@@ -15,10 +15,6 @@ from utils.log_utils import load_file_log, save_file_log
 
 
 def _load_runtime_config() -> configparser.ConfigParser:
-    """
-    Load the active settings file selected by SETTINGS_FILE, falling back to
-    the project default when the environment variable is not set.
-    """
     config = configparser.ConfigParser()
     settings_path = get_settings_file_path()
 
@@ -31,6 +27,7 @@ def _load_runtime_config() -> configparser.ConfigParser:
 
 def _build_reddit_client() -> praw.Reddit:
     client_id, client_secret, username, password = load_config_and_env()
+
     return praw.Reddit(
         client_id=client_id,
         client_secret=client_secret,
@@ -54,7 +51,6 @@ def main() -> None:
 
         print("✅ Configuration validated successfully")
         print(get_feature_summary())
-
     except Exception as exc:
         print(f"❌ Configuration validation failed: {exc}")
         print(f"\nFor detailed configuration information, check: {get_settings_file_path()}")
