@@ -80,7 +80,7 @@ def _is_video_url(url):
 
         return (
             "v.redd.it" in domain
-            or domain.endswith(("redgifs.com", "gfycat.com"))
+            or domain.endswith(("redgifs.com", "gfycat.com", "giphy.com", "streamable.com"))
             or path.endswith((".mp4", ".webm", ".mov", ".mkv", ".m3u8", ".mpd"))
             or path.endswith(".gifv")
         )
@@ -96,11 +96,12 @@ def _is_image_url(url):
         domain = parsed.netloc.lower()
         path = parsed.path.lower()
 
-        if path.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff")):
+        image_extensions = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff")
+        if path.endswith(image_extensions):
             return True
 
         path_no_query = url.split("?")[0].lower()
-        if path_no_query.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff")):
+        if any(path_no_query.endswith(ext) for ext in image_extensions):
             return True
 
         image_domains = (
@@ -119,10 +120,12 @@ def _is_image_url(url):
 
 def _extract_reddit_video_url(submission) -> Optional[str]:
     """
-    Prefer audio-capable Reddit video sources first.
+    Prefer the richest source first.
 
-    fallback_url is the video-only stream. dash_url / hls_url are the richer
-    sources that can carry audio.
+    For Reddit-hosted video/GIF posts, dash_url / hls_url are the sources that
+    can carry audio. fallback_url is the silent stream and is the last choice.
+    For external video hosts, return the original URL so yt-dlp can resolve the
+    actual media and audio.
     """
     url = _normalize_url(getattr(submission, "url", "") or "")
 
@@ -145,7 +148,7 @@ def _extract_reddit_video_url(submission) -> Optional[str]:
                 if candidate:
                     return _normalize_url(candidate)
 
-    if _host(url).endswith(("redgifs.com", "gfycat.com")):
+    if _host(url).endswith(("redgifs.com", "gfycat.com", "giphy.com", "streamable.com")):
         return url
 
     try:
@@ -162,7 +165,7 @@ def _extract_reddit_video_url(submission) -> Optional[str]:
 
 def _extract_reddit_gif_url(submission) -> Optional[str]:
     """
-    True GIFs are usually direct .gif/.gifv files or preview variants.
+    True GIFs are usually direct .gif/.gifv files or preview GIF variants.
     """
     preview = getattr(submission, "preview", None)
     if not preview:
@@ -207,7 +210,8 @@ def _extract_preview_image_url(submission) -> Optional[str]:
 
 def _is_video_like_submission(submission):
     """
-    Covers Reddit-hosted video posts, redgifs/gfycat links, and video-backed GIF-like posts.
+    Covers Reddit-hosted video posts, video-backed GIF-like posts, and external
+    GIF/video hosts where yt-dlp should be used.
     """
     try:
         url = _normalize_url(getattr(submission, "url", "") or "")
@@ -219,7 +223,7 @@ def _is_video_like_submission(submission):
         if getattr(submission, "is_video", False):
             return True
 
-        if host.endswith(("redgifs.com", "gfycat.com")):
+        if host.endswith(("redgifs.com", "gfycat.com", "giphy.com", "streamable.com")):
             return True
 
         for media_attr in ("media", "secure_media"):
@@ -256,7 +260,7 @@ def _get_media_size():
 
 def _download_image_fallback(image_url, save_directory, submission_id, ignore_tls_errors=None):
     """
-    Fallback direct requests download when the media helper fails.
+    Direct requests fallback when the main media manager cannot handle the URL.
     """
     try:
         if ignore_tls_errors is None:
@@ -478,9 +482,6 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
 
 
 def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None, context_mode=False):
-    """
-    Save a submission and its metadata, optionally unsaving it after.
-    """
     try:
         is_recovered = isinstance(submission, RecoveredItem)
 
@@ -559,9 +560,6 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
 
 
 def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None):
-    """
-    Save a comment, its context, and any child comments.
-    """
     try:
         is_recovered = isinstance(comment, RecoveredItem)
 
@@ -623,9 +621,6 @@ def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, r
 
 
 def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_errors=None):
-    """
-    Process all comments using pure blockquote nesting for hierarchy.
-    """
     for comment in comments:
         if isinstance(comment, Comment):
             bq = "> " * depth if depth > 0 else ""
