@@ -26,10 +26,12 @@ except Exception:
 
 try:
     from redgifs import API as RedgifsAPI  # type: ignore
+    from redgifs.errors import HTTPException as RedgifsHTTPException  # type: ignore
 
     REDGIFS_AVAILABLE = True
 except Exception:
     RedgifsAPI = None
+    RedgifsHTTPException = Exception
     REDGIFS_AVAILABLE = False
 
 
@@ -335,6 +337,9 @@ class MediaDownloadManager:
         This is the audio-preserving path. The API exposes the GIF metadata,
         including whether the clip has audio, and provides the URLs that should
         be downloaded.
+
+        Deleted clips return 410 Gone; that must be treated as a normal fallback
+        case, not a workflow failure.
         """
         api = self._get_redgifs_api()
         if api is None:
@@ -346,8 +351,15 @@ class MediaDownloadManager:
 
         try:
             gif = api.get_gif(gif_id)
+        except RedgifsHTTPException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            self._logger.info(f"RedGifs API returned {status} for {gif_id}; falling back")
+            return None
         except Exception as exc:
             self._logger.debug(f"RedGifs metadata fetch failed for {gif_id}: {exc}")
+            return None
+
+        if not gif:
             return None
 
         has_audio = bool(getattr(gif, "has_audio", False))
@@ -388,6 +400,9 @@ class MediaDownloadManager:
                     os.remove(save_path)
                 os.replace(tmp_path, save_path)
                 return save_path
+            except RedgifsHTTPException as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                self._logger.info(f"RedGifs download returned {status} for {gif_id}; trying next source")
             except Exception as exc:
                 self._logger.debug(f"RedGifs download attempt failed for {gif_id} via {candidate}: {exc}")
             finally:
