@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import glob
+import html
 import logging
 import os
 import re
 import subprocess
-import tempfile
 import threading
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -49,6 +49,29 @@ VIDEO_PAGE_HOSTS = (
     "giphy.com",
     "streamable.com",
     "imgur.com",
+)
+
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
+
+_URL_RE = re.compile(r'https?://[^\s"\'<>]+', re.IGNORECASE)
+_OG_VIDEO_RE = re.compile(
+    r'<meta[^>]+(?:property|name)=["\']og:video(?::url)?["\'][^>]+content=["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+_TWITTER_STREAM_RE = re.compile(
+    r'<meta[^>]+name=["\']twitter:player:stream["\'][^>]+content=["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+_REDGIFS_MEDIA_RE = re.compile(
+    r'https?://(?:media|thumbs\d*|thumbs)[^"\']*redgifs\.com[^"\']+',
+    re.IGNORECASE,
+)
+_REDGIFS_DIRECT_MEDIA_RE = re.compile(
+    r'https?://(?:media\.)?redgifs\.com/[^"\']+\.(?:mp4|m3u8|mpd|m4s)(?:\?[^"\']*)?',
+    re.IGNORECASE,
 )
 
 
@@ -153,7 +176,7 @@ def _infer_media_extension(url: str) -> str:
 
 def _extract_redgifs_id(url: str) -> Optional[str]:
     """
-    Extract the RedGifs id from common watch / iframe URLs.
+    Extract the RedGifs ID from common watch / iframe URLs.
     """
     if not url:
         return None
@@ -186,7 +209,7 @@ def _dedupe_urls(urls: List[Optional[str]]) -> List[str]:
     for url in urls:
         if not url:
             continue
-        cleaned = str(url).strip()
+        cleaned = html.unescape(str(url)).strip()
         if not cleaned or cleaned in seen:
             continue
         seen.add(cleaned)
@@ -194,14 +217,33 @@ def _dedupe_urls(urls: List[Optional[str]]) -> List[str]:
     return out
 
 
+def _looks_like_manifest(url: str) -> bool:
+    lowered = url.lower()
+    return lowered.endswith((".m3u8", ".mpd")) or ".m3u8?" in lowered or ".mpd?" in lowered
+
+
+def _looks_like_direct_media(url: str) -> bool:
+    lowered = url.lower()
+    return lowered.endswith((".mp4", ".webm", ".mov", ".mkv")) or "-silent.mp4" in lowered
+
+
+def _strip_redgifs_silent_suffix(url: str) -> str:
+    """
+    RedGifs page source often exposes ...-silent.mp4 for the silent variant.
+    If the non-silent variant exists, it is usually the same URL without
+    '-silent'.
+    """
+    cleaned = html.unescape(url or "").strip()
+    return cleaned.replace("-silent.mp4", ".mp4")
+
+
 class MediaDownloadManager:
     """
     Central coordinator for media downloads.
 
     Reddit-hosted media goes through RedditMediaDownloader.
-    RedGifs is resolved via page-style URLs first, then verified with ffprobe
-    so we only accept a file as audio-bearing when it really contains an audio
-    stream.
+    RedGifs is resolved via page-style URLs first, then verified with ffprobe so
+    we only accept a file as audio-bearing when it really contains an audio stream.
     External video/GIF hosts go through yt-dlp when available.
     """
 
@@ -220,9 +262,23 @@ class MediaDownloadManager:
     def _record_failure(self, url: str) -> None:
         self._failed_urls[url] = self._failed_urls.get(url, 0) + 1
 
-    def _download_with_requests(self, url: str, save_path: str) -> Optional[str]:
+    def _download_with_requests(self, url: str, save_path: str, referer: Optional[str] = None) -> Optional[str]:
         try:
-            response = requests.get(url, stream=True, timeout=30)
+            headers = {
+                "User-Agent": USER_AGENT,
+                "Accept": "*/*",
+            }
+            if referer:
+                headers["Referer"] = referer
+                headers["Origin"] = "https://www.redgifs.com"
+
+            response = requests.get(
+                url,
+                stream=True,
+                timeout=30,
+                headers=headers,
+                allow_redirects=True,
+            )
             response.raise_for_status()
 
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
@@ -238,7 +294,7 @@ class MediaDownloadManager:
             self._logger.debug(f"Generic download failed for {url}: {exc}")
             return None
 
-    def _download_with_ytdlp(self, url: str, save_path: str) -> Optional[str]:
+    def _download_with_ytdlp(self, url: str, save_path: str, referer: Optional[str] = None) -> Optional[str]:
         if not YT_DLP_AVAILABLE:
             return None
 
@@ -257,7 +313,12 @@ class MediaDownloadManager:
                 "retries": 3,
                 "socket_timeout": 30,
                 "paths": {"home": output_dir},
+                "http_headers": {
+                    "User-Agent": USER_AGENT,
+                },
             }
+            if referer:
+                options["http_headers"]["Referer"] = referer
 
             os.makedirs(output_dir, exist_ok=True)
 
@@ -349,10 +410,68 @@ class MediaDownloadManager:
         except Exception:
             return False
 
-    def _redgifs_page_candidates(self, url: str, gif_id: Optional[str], api_obj: Any) -> List[str]:
+    def _fetch_html(self, url: str) -> Optional[str]:
+        try:
+            response = requests.get(
+                url,
+                timeout=30,
+                headers={
+                    "User-Agent": USER_AGENT,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                },
+                allow_redirects=True,
+            )
+            response.raise_for_status()
+            return response.text
+        except Exception as exc:
+            self._logger.debug(f"Failed to fetch RedGifs HTML for {url}: {exc}")
+            return None
+
+    def _extract_redgifs_candidates_from_html(self, html_text: str) -> Dict[str, List[str]]:
         """
-        Build a list of page-style URLs that yt-dlp can resolve.
+        Return candidate URLs separated into:
+        - manifest URLs (.m3u8 / .mpd)
+        - audio-suspected URLs (non-silent mp4, stripped silent mp4)
+        - fallback URLs (silent mp4, other media)
         """
+        manifests: List[str] = []
+        audio_candidates: List[str] = []
+        fallback_candidates: List[str] = []
+
+        raw_urls = []
+        raw_urls.extend(_OG_VIDEO_RE.findall(html_text))
+        raw_urls.extend(_TWITTER_STREAM_RE.findall(html_text))
+        raw_urls.extend(_REDGIFS_MEDIA_RE.findall(html_text))
+        raw_urls.extend(_REDGIFS_DIRECT_MEDIA_RE.findall(html_text))
+        raw_urls.extend([m.group(0) for m in _URL_RE.finditer(html_text) if "redgifs.com" in m.group(0).lower()])
+
+        for raw in _dedupe_urls(raw_urls):
+            candidate = html.unescape(raw).replace("\\/", "/").strip()
+
+            if not candidate.startswith(("http://", "https://")):
+                continue
+
+            lowered = candidate.lower()
+
+            if _looks_like_manifest(candidate):
+                manifests.append(candidate)
+                continue
+
+            if _looks_like_direct_media(candidate):
+                if "-silent.mp4" in lowered:
+                    audio_candidates.append(_strip_redgifs_silent_suffix(candidate))
+                    fallback_candidates.append(candidate)
+                else:
+                    audio_candidates.append(candidate)
+                continue
+
+        return {
+            "manifests": _dedupe_urls(manifests),
+            "audio_candidates": _dedupe_urls(audio_candidates),
+            "fallback_candidates": _dedupe_urls(fallback_candidates),
+        }
+
+    def _build_redgifs_page_urls(self, url: str, gif_id: Optional[str], api_obj: Any) -> List[str]:
         candidates: List[Optional[str]] = [url]
 
         if gif_id and api_obj is not None:
@@ -373,132 +492,167 @@ class MediaDownloadManager:
 
         return _dedupe_urls(candidates)
 
-    def _redgifs_direct_candidates(self, gif_id: Optional[str], api_obj: Any) -> List[str]:
+    def _download_redgifs_candidates(
+        self,
+        candidates: List[str],
+        save_path: str,
+        require_audio: bool,
+        referer: Optional[str] = None,
+    ) -> Optional[str]:
         """
-        Build direct-media RedGifs URLs to try only after page-based extraction.
+        Try candidate URLs in order. If require_audio is True, only accept a file
+        that ffprobe confirms contains an audio stream.
         """
-        if not gif_id or api_obj is None:
-            return []
+        first_silent: Optional[str] = None
 
-        try:
-            gif = api_obj.get_gif(gif_id)
-        except Exception as exc:
-            self._logger.debug(f"RedGifs metadata fetch failed for direct candidates {gif_id}: {exc}")
-            return []
+        for candidate in candidates:
+            downloaded = None
 
-        if not gif:
-            return []
+            if _looks_like_manifest(candidate):
+                downloaded = self._download_with_ytdlp(candidate, save_path, referer=referer)
+            else:
+                downloaded = self._download_with_requests(candidate, save_path, referer=referer)
 
-        urls_obj = getattr(gif, "urls", None)
-        return _dedupe_urls(
-            [
-                _obj_get(urls_obj, "hd"),
-                _obj_get(urls_obj, "file_url"),
-                _obj_get(urls_obj, "sd"),
-            ]
-        )
+            if not downloaded:
+                continue
+
+            if require_audio:
+                if self._has_audio_stream(downloaded):
+                    return downloaded
+
+                if first_silent is None:
+                    first_silent = downloaded
+                continue
+
+            return downloaded
+
+        return first_silent if not require_audio else None
 
     def _download_redgifs(self, url: str, save_path: str) -> Optional[str]:
         """
-        Resolve RedGifs through page URLs first and only accept a result if the
-        final file has audio when the clip reports has_audio=True.
+        Resolve RedGifs from the page source first.
+
+        The repo previously accepted silent direct media URLs too early. Now the
+        flow is:
+
+        1) Get page URLs (watch/web/embed)
+        2) Fetch HTML
+        3) Prefer stripped '-silent.mp4' candidates and manifest URLs
+        4) Use ffprobe to verify audio when the GIF says it has audio
+        5) Only then fall back to other candidates
         """
         gif_id = _extract_redgifs_id(url)
         api = self._get_redgifs_api()
 
-        if not gif_id or api is None:
-            return self._download_with_ytdlp(url, save_path)
+        has_audio = False
+        page_urls = self._build_redgifs_page_urls(url, gif_id, api)
 
-        try:
-            gif = api.get_gif(gif_id)
-        except Exception as exc:
-            self._logger.debug(f"RedGifs metadata fetch failed for {gif_id}: {exc}")
-            return self._download_with_ytdlp(url, save_path)
+        if gif_id and api is not None:
+            try:
+                gif = api.get_gif(gif_id)
+            except Exception as exc:
+                self._logger.debug(f"RedGifs metadata fetch failed for {gif_id}: {exc}")
+                gif = None
 
-        if not gif:
-            return self._download_with_ytdlp(url, save_path)
+            if gif:
+                has_audio = bool(getattr(gif, "has_audio", False))
+                self._logger.info(f"RedGifs clip {gif_id}: has_audio={has_audio}")
+                urls_obj = getattr(gif, "urls", None)
+                page_urls = _dedupe_urls(
+                    page_urls
+                    + [
+                        _obj_get(urls_obj, "web_url"),
+                        _obj_get(urls_obj, "embed_url"),
+                    ]
+                )
 
-        has_audio = bool(getattr(gif, "has_audio", False))
-        self._logger.info(f"RedGifs clip {gif_id}: has_audio={has_audio}")
+        manifest_candidates: List[str] = []
+        audio_candidates: List[str] = []
+        fallback_candidates: List[str] = []
 
-        page_candidates = self._redgifs_page_candidates(url, gif_id, api)
-        direct_candidates = self._redgifs_direct_candidates(gif_id, api)
-        silent_candidate: Optional[str] = None
-
-        for candidate in page_candidates:
-            downloaded = self._download_with_ytdlp(candidate, save_path)
-            if not downloaded:
+        for page_url in page_urls:
+            html_text = self._fetch_html(page_url)
+            if not html_text:
                 continue
 
-            if self._has_audio_stream(downloaded):
-                return downloaded
+            extracted = self._extract_redgifs_candidates_from_html(html_text)
+            manifest_candidates.extend(extracted["manifests"])
+            audio_candidates.extend(extracted["audio_candidates"])
+            fallback_candidates.extend(extracted["fallback_candidates"])
 
-            if silent_candidate is None:
-                silent_candidate = downloaded
+        manifest_candidates = _dedupe_urls(manifest_candidates)
+        audio_candidates = _dedupe_urls(audio_candidates)
+        fallback_candidates = _dedupe_urls(fallback_candidates)
 
         if has_audio:
-            for candidate in direct_candidates:
-                tmp_fd = None
-                tmp_path = None
-                try:
-                    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mp4")
-                    os.close(tmp_fd)
-                    tmp_fd = None
+            audio_first = self._download_redgifs_candidates(
+                audio_candidates,
+                save_path,
+                require_audio=True,
+                referer=page_urls[0] if page_urls else None,
+            )
+            if audio_first:
+                return audio_first
 
-                    downloaded = self._download_with_ytdlp(candidate, tmp_path)
-                    if not downloaded:
-                        if os.path.exists(tmp_path):
-                            os.remove(tmp_path)
-                        continue
+            manifest_first = self._download_redgifs_candidates(
+                manifest_candidates,
+                save_path,
+                require_audio=True,
+                referer=page_urls[0] if page_urls else None,
+            )
+            if manifest_first:
+                return manifest_first
 
-                    if self._has_audio_stream(downloaded):
-                        if os.path.exists(save_path):
-                            os.remove(save_path)
-                        os.replace(downloaded, save_path)
-                        return save_path
-                except Exception as exc:
-                    self._logger.debug(f"RedGifs direct candidate failed for {gif_id}: {exc}")
-                finally:
-                    if tmp_path and os.path.exists(tmp_path) and tmp_path != save_path:
-                        try:
-                            os.remove(tmp_path)
-                        except OSError:
-                            pass
+            direct_media_candidates = []
+            for candidate in audio_candidates + fallback_candidates:
+                if candidate not in direct_media_candidates:
+                    direct_media_candidates.append(candidate)
+
+            for candidate in direct_media_candidates:
+                downloaded = self._download_with_requests(
+                    candidate,
+                    save_path,
+                    referer=page_urls[0] if page_urls else None,
+                )
+                if downloaded and self._has_audio_stream(downloaded):
+                    return downloaded
 
             self._logger.warning(
-                f"RedGifs clip {gif_id} reported audio, but no downloaded candidate contained an audio stream"
+                f"RedGifs clip {gif_id} reported audio, but no extracted candidate contained an audio stream"
             )
             return None
 
-        if silent_candidate:
-            return silent_candidate
+        no_audio_first = self._download_redgifs_candidates(
+            audio_candidates,
+            save_path,
+            require_audio=False,
+            referer=page_urls[0] if page_urls else None,
+        )
+        if no_audio_first:
+            return no_audio_first
 
-        for candidate in direct_candidates:
-            tmp_fd = None
-            tmp_path = None
-            try:
-                tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mp4")
-                os.close(tmp_fd)
-                tmp_fd = None
+        no_audio_first = self._download_redgifs_candidates(
+            manifest_candidates,
+            save_path,
+            require_audio=False,
+            referer=page_urls[0] if page_urls else None,
+        )
+        if no_audio_first:
+            return no_audio_first
 
-                downloaded = self._download_with_ytdlp(candidate, tmp_path)
-                if not downloaded:
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
-                    continue
+        no_audio_first = self._download_redgifs_candidates(
+            fallback_candidates,
+            save_path,
+            require_audio=False,
+            referer=page_urls[0] if page_urls else None,
+        )
+        if no_audio_first:
+            return no_audio_first
 
-                if os.path.exists(save_path):
-                    os.remove(save_path)
-                os.replace(downloaded, save_path)
-                return save_path
-            except Exception as exc:
-                self._logger.debug(f"RedGifs silent candidate failed for {gif_id}: {exc}")
-            finally:
-                if tmp_path and os.path.exists(tmp_path) and tmp_path != save_path:
-                    try:
-                        os.remove(tmp_path)
-                    except OSError:
-                        pass
+        for candidate in page_urls:
+            downloaded = self._download_with_ytdlp(candidate, save_path, referer=candidate)
+            if downloaded:
+                return downloaded
 
         return None
 
@@ -542,13 +696,13 @@ class MediaDownloadManager:
                 return None
 
             if _is_video_page(url):
-                local_path = self._download_with_ytdlp(url, save_path)
+                local_path = self._download_with_ytdlp(url, save_path, referer=url)
                 if local_path:
                     with self._url_lock:
                         self._downloaded_urls[url] = local_path
                     return local_path
 
-                local_path = self._download_with_requests(url, save_path)
+                local_path = self._download_with_requests(url, save_path, referer=url)
                 if local_path:
                     with self._url_lock:
                         self._downloaded_urls[url] = local_path
@@ -558,7 +712,7 @@ class MediaDownloadManager:
                 return None
 
             if _is_direct_image(url):
-                local_path = self._download_with_requests(url, save_path)
+                local_path = self._download_with_requests(url, save_path, referer=url)
                 if local_path:
                     with self._url_lock:
                         self._downloaded_urls[url] = local_path
@@ -567,7 +721,7 @@ class MediaDownloadManager:
                 self._record_failure(url)
                 return None
 
-            local_path = self._download_with_requests(url, save_path)
+            local_path = self._download_with_requests(url, save_path, referer=url)
             if local_path:
                 with self._url_lock:
                     self._downloaded_urls[url] = local_path
@@ -641,4 +795,4 @@ def download_media_file(url: str, save_directory: str, file_id: str) -> Optional
     except Exception as exc:
         logging.error(f"Error in download_media_file for {url}: {exc}")
         return None
-    
+        
