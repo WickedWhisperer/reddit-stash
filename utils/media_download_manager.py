@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from dataclasses import dataclass
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
@@ -14,25 +13,37 @@ from .media_services.reddit_media import RedditMediaDownloader
 logger = logging.getLogger(__name__)
 
 
-def _looks_like_reddit_media(url: str) -> bool:
+def _host(url: str) -> str:
     try:
-        parsed = urlparse(url)
-        domain = parsed.netloc.lower()
-        return domain.endswith(
-            (
-                "i.redd.it",
-                "v.redd.it",
-                "preview.redd.it",
-                "external-preview.redd.it",
-            )
-        )
+        return urlparse(url or "").netloc.lower()
     except Exception:
+        return ""
+
+
+def _looks_like_media_host(url: str) -> bool:
+    """
+    Hosts that should be handed to the advanced downloader instead of a plain GET.
+    """
+    domain = _host(url)
+    if not domain:
         return False
+
+    advanced_hosts = (
+        "i.redd.it",
+        "v.redd.it",
+        "preview.redd.it",
+        "external-preview.redd.it",
+        "redgifs.com",
+        "gfycat.com",
+        "imgur.com",
+        "i.imgur.com",
+    )
+    return any(domain.endswith(h) for h in advanced_hosts)
 
 
 def _infer_media_extension(url: str) -> str:
     """
-    Infer a sane extension for extensionless Reddit URLs.
+    Pick a sensible extension for extensionless media URLs.
     """
     try:
         parsed = urlparse(url or "")
@@ -44,17 +55,29 @@ def _infer_media_extension(url: str) -> str:
         if ext == ".gifv":
             return ".mp4"
 
-        if ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".mp4", ".webm", ".mov"}:
+        if ext in {
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".gif",
+            ".webp",
+            ".bmp",
+            ".tiff",
+            ".mp4",
+            ".webm",
+            ".mov",
+            ".mkv",
+        }:
             return ext
 
-        if "v.redd.it" in domain or path.startswith("/dash_"):
+        if "v.redd.it" in domain:
+            return ".mp4"
+
+        if domain.endswith(("redgifs.com", "gfycat.com")):
             return ".mp4"
 
         if domain.endswith(("i.redd.it", "preview.redd.it", "external-preview.redd.it")):
             return ".jpg"
-
-        if domain.endswith(("redgifs.com", "gfycat.com")):
-            return ".mp4"
 
         return ".jpg"
     except Exception:
@@ -62,19 +85,11 @@ def _infer_media_extension(url: str) -> str:
 
 
 class MediaDownloadManager:
-    """
-    Minimal, reliable media manager.
-
-    The important fix is that downloads are no longer blocked just because
-    images are disabled. Video/GIF-style Reddit media now gets a chance to run.
-    """
-
     def __init__(self):
         self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         self._url_lock = threading.Lock()
         self._downloaded_urls: Dict[str, str] = {}
         self._failed_urls: Dict[str, int] = {}
-        self._reddit_downloader: Optional[RedditMediaDownloader] = None
 
         try:
             self._reddit_downloader = RedditMediaDownloader()
@@ -94,7 +109,6 @@ class MediaDownloadManager:
             response.raise_for_status()
 
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-
             with open(save_path, "wb") as handle:
                 for chunk in response.iter_content(chunk_size=1024 * 256):
                     if chunk:
@@ -102,7 +116,6 @@ class MediaDownloadManager:
 
             if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
                 return save_path
-
             return None
         except Exception as exc:
             self._logger.debug(f"Generic download failed for {url}: {exc}")
@@ -117,17 +130,16 @@ class MediaDownloadManager:
 
         with self._url_lock:
             if self._should_skip_url(url):
-                self._logger.debug(f"Skipping URL after prior failures: {url}")
                 return None
 
             if url in self._downloaded_urls:
-                existing = self._downloaded_urls[url]
-                if os.path.exists(existing) and os.path.getsize(existing) > 0:
-                    return existing
+                cached = self._downloaded_urls[url]
+                if os.path.exists(cached) and os.path.getsize(cached) > 0:
+                    return cached
                 self._downloaded_urls.pop(url, None)
 
         try:
-            if _looks_like_reddit_media(url) and self._reddit_downloader is not None:
+            if _looks_like_media_host(url) and self._reddit_downloader is not None:
                 result = self._reddit_downloader.download(url, save_path)
                 if getattr(result, "is_success", False) and getattr(result, "local_path", None):
                     local_path = result.local_path
@@ -135,7 +147,9 @@ class MediaDownloadManager:
                         self._downloaded_urls[url] = local_path
                     return local_path
 
-                self._logger.debug(f"Reddit downloader failed for {url}: {getattr(result, 'error_message', None)}")
+                self._logger.debug(
+                    f"Advanced downloader failed for {url}: {getattr(result, 'error_message', None)}"
+                )
                 self._record_failure(url)
                 return None
 
@@ -195,7 +209,6 @@ def download_media_file(url: str, save_directory: str, file_id: str) -> Optional
 
     try:
         os.makedirs(save_directory, exist_ok=True)
-
         extension = _infer_media_extension(url)
         filename = f"{file_id}{extension}"
         save_path = os.path.join(save_directory, filename)
