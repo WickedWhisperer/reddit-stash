@@ -21,9 +21,8 @@ tenacity>=9.0.0 # Intelligent retry strategies
 
 backoff>=2.2.1 # Exponential backoff with jitter for rate limiting
 
-yt-dlp # Reddit video extraction + ffmpeg muxing
-
-redgifs>=2.4.0 # RedGifs API downloader with audio-aware metadata
+yt-dlp # Reddit / RedGifs video extraction + audio muxing
+redgifs>=2.4.0 # RedGifs API client
 
 # Enhanced configuration and validation
 configparser>=7.2.0 # Configuration parsing
