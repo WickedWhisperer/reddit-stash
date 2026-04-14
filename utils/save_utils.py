@@ -19,7 +19,6 @@ from utils.praw_helpers import RecoveredItem, create_recovery_metadata_markdown
 from utils.time_utilities import lazy_load_comments
 
 logger = logging.getLogger(__name__)
-
 _media_size_local = threading.local()
 
 
@@ -53,6 +52,13 @@ def _normalize_url(url: str) -> str:
     return html.unescape(url or "").strip()
 
 
+def _host(url: str) -> str:
+    try:
+        return urlparse(url or "").netloc.lower()
+    except Exception:
+        return ""
+
+
 def _is_gif_url(url):
     if not url:
         return False
@@ -64,28 +70,45 @@ def _is_gif_url(url):
         return False
 
 
-def _is_image_url(url):
-    if not url or _is_gif_url(url):
+def _is_video_url(url):
+    if not url:
         return False
     try:
         parsed = urlparse(url)
         domain = parsed.netloc.lower()
         path = parsed.path.lower()
 
-        image_extensions = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff")
-        if path.endswith(image_extensions):
+        return (
+            "v.redd.it" in domain
+            or domain.endswith(("redgifs.com", "gfycat.com"))
+            or path.endswith((".mp4", ".webm", ".mov", ".mkv", ".m3u8", ".mpd"))
+            or path.endswith(".gifv")
+        )
+    except Exception:
+        return False
+
+
+def _is_image_url(url):
+    if not url or _is_gif_url(url) or _is_video_url(url):
+        return False
+    try:
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        path = parsed.path.lower()
+
+        if path.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff")):
             return True
 
         path_no_query = url.split("?")[0].lower()
-        if any(path_no_query.endswith(ext) for ext in image_extensions):
+        if path_no_query.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff")):
             return True
 
-        image_domains = [
+        image_domains = (
             "i.redd.it",
             "i.imgur.com",
             "preview.redd.it",
             "external-preview.redd.it",
-        ]
+        )
         if any(domain.endswith(d) for d in image_domains):
             return True
 
@@ -94,29 +117,12 @@ def _is_image_url(url):
         return False
 
 
-def _is_video_url(url):
-    if not url:
-        return False
-    try:
-        parsed = urlparse(url)
-        domain = parsed.netloc.lower()
-        return (
-            "v.redd.it" in domain
-            or parsed.path.lower().endswith(".mp4")
-            or parsed.path.lower().endswith(".webm")
-            or parsed.path.lower().endswith(".m3u8")
-            or parsed.path.lower().endswith(".mpd")
-        )
-    except Exception:
-        return False
-
-
 def _extract_reddit_video_url(submission) -> Optional[str]:
     """
-    Prefer the richest Reddit video source first.
+    Prefer audio-capable Reddit video sources first.
 
-    Reddit developers note that fallback_url is the video-only stream, while
-    dash_url / hls_url are the sources that can carry audio.
+    fallback_url is the video-only stream. dash_url / hls_url are the richer
+    sources that can carry audio.
     """
     url = _normalize_url(getattr(submission, "url", "") or "")
 
@@ -138,6 +144,9 @@ def _extract_reddit_video_url(submission) -> Optional[str]:
                 candidate = reddit_video_preview.get(key)
                 if candidate:
                     return _normalize_url(candidate)
+
+    if _host(url).endswith(("redgifs.com", "gfycat.com")):
+        return url
 
     try:
         parsed = urlparse(url)
@@ -198,14 +207,19 @@ def _extract_preview_image_url(submission) -> Optional[str]:
 
 def _is_video_like_submission(submission):
     """
-    Covers Reddit-hosted video posts and video-backed GIF-like posts.
+    Covers Reddit-hosted video posts, redgifs/gfycat links, and video-backed GIF-like posts.
     """
     try:
         url = _normalize_url(getattr(submission, "url", "") or "")
+        host = _host(url)
+
         if _is_video_url(url):
             return True
 
         if getattr(submission, "is_video", False):
+            return True
+
+        if host.endswith(("redgifs.com", "gfycat.com")):
             return True
 
         for media_attr in ("media", "secure_media"):
@@ -276,6 +290,7 @@ def _download_image_fallback(image_url, save_directory, submission_id, ignore_tl
                 ".mp4",
                 ".webm",
                 ".mov",
+                ".mkv",
             ]:
                 extension = ".jpg"
 
@@ -329,7 +344,6 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
     """
     Handle media detection and download for a submission's link post.
     """
-    # 1. Gallery posts
     if (
         not is_recovered
         and hasattr(submission, "is_gallery")
@@ -390,10 +404,11 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
 
             f.write(f"**Original Gallery URL:** [Link](https://reddit.com{submission.permalink})\n")
         else:
-            f.write(f"**Gallery post** (images unavailable): [View on Reddit](https://reddit.com{submission.permalink})\n")
+            f.write(
+                f"**Gallery post** (images unavailable): [View on Reddit](https://reddit.com{submission.permalink})\n"
+            )
         return
 
-    # 2. Reddit video / video-backed GIF
     if _is_video_like_submission(submission):
         if media_config.is_videos_enabled():
             video_url = _get_video_download_url(submission)
@@ -416,7 +431,6 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
             f.write(f"**Video (download disabled):** [Link]({submission.url})\n")
         return
 
-    # 3. True GIFs or GIF variants from preview metadata
     gif_url = _extract_reddit_gif_url(submission)
     if gif_url:
         if media_config.is_gifs_enabled():
@@ -436,7 +450,6 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
             f.write(f"![GIF (download disabled)]({gif_url})\n")
         return
 
-    # 4. Images
     image_url = getattr(submission, "url", "") or ""
     if _is_image_url(image_url):
         if media_config.is_images_enabled():
@@ -456,13 +469,11 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
             f.write(f"![Image]({image_url})\n")
         return
 
-    # 5. YouTube
     if "youtube.com" in image_url or "youtu.be" in image_url:
         video_id = extract_video_id(image_url)
         f.write(f"[![Video](https://img.youtube.com/vi/{video_id}/0.jpg)]({image_url})")
         return
 
-    # 6. Everything else
     f.write(image_url if image_url else "[Deleted Post]")
 
 
@@ -623,6 +634,7 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
             f.write(f"{bq}*Upvotes: {comment.score} | [Permalink](https://reddit.com{comment.permalink})*\n\n")
 
             comment_body = comment.body if comment.body else "[deleted]"
+            video_url = None
             gif_url = None
             image_url = None
 
@@ -630,25 +642,53 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
             if words:
                 potential_url = words[-1]
                 if potential_url.startswith(("http://", "https://")) and "." in potential_url:
-                    if _is_gif_url(potential_url):
+                    if _is_video_url(potential_url):
+                        video_url = potential_url
+                    elif _is_gif_url(potential_url):
                         gif_url = potential_url
                     elif _is_image_url(potential_url):
                         image_url = potential_url
 
-            if gif_url:
+            if video_url:
+                body_before_url = comment_body[: comment_body.rfind(video_url)].strip()
+                if body_before_url:
+                    for line in body_before_url.split("\n"):
+                        f.write(f"{bq}{line}\n")
+                f.write(f"{bq}\n")
+
+                video_path, video_size = download_image(
+                    video_url,
+                    os.path.dirname(f.name),
+                    comment.id,
+                    ignore_tls_errors,
+                )
+                if video_path:
+                    f.write(f"{bq}![Video]({video_path})\n")
+                    f.write(f"{bq}*Original Video URL: [Link]({video_url})*\n\n")
+                    _track_media_size(video_size)
+                else:
+                    f.write(f"{bq}![Video]({video_url})\n\n")
+
+            elif gif_url:
                 body_before_url = comment_body[: comment_body.rfind(gif_url)].strip()
                 if body_before_url:
                     for line in body_before_url.split("\n"):
                         f.write(f"{bq}{line}\n")
                 f.write(f"{bq}\n")
 
-                gif_path, gif_size = download_image(gif_url, os.path.dirname(f.name), comment.id, ignore_tls_errors)
+                gif_path, gif_size = download_image(
+                    gif_url,
+                    os.path.dirname(f.name),
+                    comment.id,
+                    ignore_tls_errors,
+                )
                 if gif_path:
                     f.write(f"{bq}![GIF]({gif_path})\n")
                     f.write(f"{bq}*Original GIF URL: [Link]({gif_url})*\n\n")
                     _track_media_size(gif_size)
                 else:
                     f.write(f"{bq}![GIF]({gif_url})\n\n")
+
             elif image_url:
                 body_before_url = comment_body[: comment_body.rfind(image_url)].strip()
                 if body_before_url:
@@ -656,7 +696,12 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
                         f.write(f"{bq}{line}\n")
                 f.write(f"{bq}\n")
 
-                image_path, image_size = download_image(image_url, os.path.dirname(f.name), comment.id, ignore_tls_errors)
+                image_path, image_size = download_image(
+                    image_url,
+                    os.path.dirname(f.name),
+                    comment.id,
+                    ignore_tls_errors,
+                )
                 if image_path:
                     f.write(f"{bq}![Image]({image_path})\n")
                     f.write(f"{bq}*Original Image URL: [Link]({image_url})*\n\n")
