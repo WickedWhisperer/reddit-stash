@@ -59,6 +59,10 @@ def _host(url: str) -> str:
         return ""
 
 
+def _clean_url(url: str) -> str:
+    return (url or "").rstrip(").,!?]}>\"'")
+
+
 def _is_gif_url(url):
     if not url:
         return False
@@ -77,6 +81,7 @@ def _is_video_url(url):
         parsed = urlparse(url)
         domain = parsed.netloc.lower()
         path = parsed.path.lower()
+
         return (
             "v.redd.it" in domain
             or domain.endswith(("redgifs.com", "gfycat.com", "giphy.com", "streamable.com"))
@@ -117,19 +122,9 @@ def _is_image_url(url):
         return False
 
 
-def _is_video_like_host(url: str) -> bool:
-    host = _host(url)
-    return host.endswith(("redgifs.com", "gfycat.com", "giphy.com", "streamable.com"))
-
-
 def _extract_reddit_video_url(submission) -> Optional[str]:
     """
-    Prefer the richest source first.
-
-    For Reddit-hosted video/GIF posts, dash_url / hls_url are the sources that can
-    carry audio. fallback_url is the silent stream and is the last choice.
-    For external video hosts, return the original URL so yt-dlp can resolve the
-    actual media and audio.
+    Prefer richer Reddit video sources first.
     """
     url = _normalize_url(getattr(submission, "url", "") or "")
 
@@ -152,7 +147,7 @@ def _extract_reddit_video_url(submission) -> Optional[str]:
                 if candidate:
                     return _normalize_url(candidate)
 
-    if _is_video_like_host(url):
+    if _host(url).endswith(("redgifs.com", "gfycat.com", "giphy.com", "streamable.com")):
         return url
 
     try:
@@ -168,9 +163,6 @@ def _extract_reddit_video_url(submission) -> Optional[str]:
 
 
 def _extract_reddit_gif_url(submission) -> Optional[str]:
-    """
-    True GIFs are usually direct .gif/.gifv files or preview GIF variants.
-    """
     preview = getattr(submission, "preview", None)
     if not preview:
         return None
@@ -197,35 +189,21 @@ def _extract_reddit_gif_url(submission) -> Optional[str]:
     return None
 
 
-def _extract_preview_image_url(submission) -> Optional[str]:
-    preview = getattr(submission, "preview", None)
-    if not preview:
-        return None
-
-    images = _nested_get(preview, "images", default=[])
-    if isinstance(images, list):
-        for image in images:
-            source_url = _nested_get(image, "source", "url")
-            if source_url:
-                return _normalize_url(source_url)
-
-    return None
-
-
 def _is_video_like_submission(submission):
     """
-    Covers Reddit-hosted video posts, video-backed GIF-like posts, and external
-    GIF/video hosts where yt-dlp should be used.
+    Covers Reddit-hosted video posts and video-backed GIF-like posts.
     """
     try:
         url = _normalize_url(getattr(submission, "url", "") or "")
+        host = _host(url)
+
         if _is_video_url(url):
             return True
 
         if getattr(submission, "is_video", False):
             return True
 
-        if _is_video_like_host(url):
+        if host.endswith(("redgifs.com", "gfycat.com", "giphy.com", "streamable.com")):
             return True
 
         for media_attr in ("media", "secure_media"):
@@ -262,7 +240,7 @@ def _get_media_size():
 
 def _download_image_fallback(image_url, save_directory, submission_id, ignore_tls_errors=None):
     """
-    Direct requests fallback when the main media manager cannot handle the URL.
+    Direct requests fallback for normal image URLs only.
     """
     try:
         if ignore_tls_errors is None:
@@ -322,6 +300,9 @@ def _download_image_fallback(image_url, save_directory, submission_id, ignore_tl
 def download_image(image_url, save_directory, submission_id, ignore_tls_errors=None):
     """
     Download a media file and save it locally.
+
+    For video-like URLs, do not fall back to a raw request if the media manager
+    fails, because that can silently bypass audio-aware source selection.
     """
     try:
         from .media_download_manager import download_media_file
@@ -333,6 +314,9 @@ def download_image(image_url, save_directory, submission_id, ignore_tls_errors=N
                 return result_path, file_size
             except OSError:
                 return result_path, 0
+
+        if _is_video_url(image_url):
+            return None, 0
 
         fallback_path, fallback_size = _download_image_fallback(
             image_url,
@@ -346,32 +330,21 @@ def download_image(image_url, save_directory, submission_id, ignore_tls_errors=N
         return None, 0
 
 
-def _media_kind_allowed_for_url(url: str, media_config) -> bool:
-    """
-    Decide whether a URL should be downloaded based on enabled media settings.
-    """
-    if _is_video_like_host(url):
-        return media_config.is_videos_enabled() or media_config.is_gifs_enabled()
-    if _is_video_url(url):
-        return media_config.is_videos_enabled() or media_config.is_gifs_enabled()
-    if _is_gif_url(url):
-        return media_config.is_gifs_enabled()
-    return media_config.is_images_enabled()
-
-
 def _save_submission_media(submission, f, is_recovered, media_config, save_dir, ignore_tls_errors, context_mode):
     """
     Handle media detection and download for a submission's link post.
     """
-    submission_url = _normalize_url(getattr(submission, "url", "") or "")
-
     if (
         not is_recovered
         and hasattr(submission, "is_gallery")
         and submission.is_gallery
-        and media_config.is_albums_enabled()
-        and media_config.is_images_enabled()
     ):
+        if not media_config.is_albums_enabled() or not media_config.is_images_enabled():
+            f.write(
+                f"**Gallery post** (image downloads disabled): [View on Reddit](https://reddit.com{submission.permalink})\n"
+            )
+            return
+
         try:
             from .media_services.reddit_media import RedditMediaDownloader
 
@@ -426,13 +399,11 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
 
             f.write(f"**Original Gallery URL:** [Link](https://reddit.com{submission.permalink})\n")
         else:
-            f.write(
-                f"**Gallery post** (images unavailable): [View on Reddit](https://reddit.com{submission.permalink})\n"
-            )
+            f.write(f"**Gallery post** (images unavailable): [View on Reddit](https://reddit.com{submission.permalink})\n")
         return
 
     if _is_video_like_submission(submission):
-        if _media_kind_allowed_for_url(submission_url, media_config):
+        if media_config.is_videos_enabled():
             video_url = _get_video_download_url(submission)
             if video_url:
                 video_path, video_size = download_image(
@@ -472,7 +443,7 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
             f.write(f"![GIF (download disabled)]({gif_url})\n")
         return
 
-    image_url = submission_url
+    image_url = getattr(submission, "url", "") or ""
     if _is_image_url(image_url):
         if media_config.is_images_enabled():
             image_path, image_size = download_image(
@@ -488,7 +459,7 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
             else:
                 f.write(f"![Image]({image_url})\n")
         else:
-            f.write(f"[Image]({image_url})")
+            f.write(f"![Image]({image_url})\n")
         return
 
     if "youtube.com" in image_url or "youtu.be" in image_url:
@@ -500,9 +471,6 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
 
 
 def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None, context_mode=False):
-    """
-    Save a submission and its metadata, optionally unsaving it after.
-    """
     try:
         is_recovered = isinstance(submission, RecoveredItem)
 
@@ -566,7 +534,12 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
 
         f.write("\n\n## Comments:\n\n")
         lazy_comments = lazy_load_comments(submission)
-        process_comments(lazy_comments, f, ignore_tls_errors=ignore_tls_errors)
+        process_comments(
+            lazy_comments,
+            f,
+            ignore_tls_errors=ignore_tls_errors,
+            media_config=media_config if "media_config" in locals() else get_media_config(),
+        )
 
         if unsave:
             try:
@@ -581,9 +554,6 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
 
 
 def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None):
-    """
-    Save a comment, its context, and any child comments.
-    """
     try:
         is_recovered = isinstance(comment, RecoveredItem)
 
@@ -630,7 +600,14 @@ def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, r
 
         if comment.replies:
             f.write("\n\n## Child Comments:\n\n")
-            process_comments(comment.replies, f, depth=0, simple_format=False, ignore_tls_errors=ignore_tls_errors)
+            process_comments(
+                comment.replies,
+                f,
+                depth=0,
+                simple_format=False,
+                ignore_tls_errors=ignore_tls_errors,
+                media_config=get_media_config(),
+            )
 
         if unsave:
             try:
@@ -644,11 +621,9 @@ def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, r
         raise
 
 
-def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_errors=None):
-    """
-    Process all comments using pure blockquote nesting for hierarchy.
-    """
-    media_config = get_media_config()
+def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_errors=None, media_config=None):
+    if media_config is None:
+        media_config = get_media_config()
 
     for comment in comments:
         if isinstance(comment, Comment):
@@ -664,7 +639,7 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
 
             words = comment_body.split()
             if words:
-                potential_url = words[-1]
+                potential_url = _clean_url(words[-1])
                 if potential_url.startswith(("http://", "https://")) and "." in potential_url:
                     if _is_video_url(potential_url):
                         video_url = potential_url
@@ -674,13 +649,13 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
                         image_url = potential_url
 
             if video_url:
-                body_before_url = comment_body[: comment_body.rfind(video_url)].strip()
+                body_before_url = comment_body[: comment_body.rfind(words[-1])].strip()
                 if body_before_url:
                     for line in body_before_url.split("\n"):
                         f.write(f"{bq}{line}\n")
                 f.write(f"{bq}\n")
 
-                if _media_kind_allowed_for_url(video_url, media_config):
+                if media_config.is_videos_enabled():
                     video_path, video_size = download_image(
                         video_url,
                         os.path.dirname(f.name),
@@ -697,7 +672,7 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
                     f.write(f"{bq}[Video]({video_url})\n\n")
 
             elif gif_url:
-                body_before_url = comment_body[: comment_body.rfind(gif_url)].strip()
+                body_before_url = comment_body[: comment_body.rfind(words[-1])].strip()
                 if body_before_url:
                     for line in body_before_url.split("\n"):
                         f.write(f"{bq}{line}\n")
@@ -720,7 +695,7 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
                     f.write(f"{bq}[GIF]({gif_url})\n\n")
 
             elif image_url:
-                body_before_url = comment_body[: comment_body.rfind(image_url)].strip()
+                body_before_url = comment_body[: comment_body.rfind(words[-1])].strip()
                 if body_before_url:
                     for line in body_before_url.split("\n"):
                         f.write(f"{bq}{line}\n")
@@ -748,8 +723,14 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
                 f.write("\n")
 
             if not simple_format and comment.replies:
-                process_comments(comment.replies, f, depth + 1, simple_format, ignore_tls_errors)
+                process_comments(
+                    comment.replies,
+                    f,
+                    depth + 1,
+                    simple_format,
+                    ignore_tls_errors,
+                    media_config=media_config,
+                )
 
         if depth == 0:
             f.write("---\n")
-                        
