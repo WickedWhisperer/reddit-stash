@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import glob
 import logging
 import os
 import threading
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
@@ -12,6 +14,30 @@ from .media_services.reddit_media import RedditMediaDownloader
 
 logger = logging.getLogger(__name__)
 
+try:
+    import yt_dlp  # type: ignore
+
+    YT_DLP_AVAILABLE = True
+except Exception:
+    yt_dlp = None
+    YT_DLP_AVAILABLE = False
+
+
+REDDIT_MEDIA_HOSTS = (
+    "i.redd.it",
+    "v.redd.it",
+    "preview.redd.it",
+    "external-preview.redd.it",
+)
+
+VIDEO_PAGE_HOSTS = (
+    "redgifs.com",
+    "gfycat.com",
+    "giphy.com",
+    "streamable.com",
+    "imgur.com",
+)
+
 
 def _host(url: str) -> str:
     try:
@@ -20,30 +46,47 @@ def _host(url: str) -> str:
         return ""
 
 
-def _looks_like_media_host(url: str) -> bool:
-    """
-    Hosts that should be handed to the advanced downloader instead of a plain GET.
-    """
+def _path(url: str) -> str:
+    try:
+        return urlparse(url or "").path.lower()
+    except Exception:
+        return ""
+
+
+def _is_reddit_media(url: str) -> bool:
     domain = _host(url)
+    return any(domain.endswith(host) for host in REDDIT_MEDIA_HOSTS)
+
+
+def _is_video_page(url: str) -> bool:
+    domain = _host(url)
+    path = _path(url)
     if not domain:
         return False
 
-    advanced_hosts = (
-        "i.redd.it",
-        "v.redd.it",
-        "preview.redd.it",
-        "external-preview.redd.it",
-        "redgifs.com",
-        "gfycat.com",
-        "imgur.com",
-        "i.imgur.com",
-    )
-    return any(domain.endswith(h) for h in advanced_hosts)
+    if any(domain.endswith(host) for host in VIDEO_PAGE_HOSTS):
+        return True
+
+    if path.endswith(".gifv"):
+        return True
+
+    return False
+
+
+def _is_direct_image(url: str) -> bool:
+    domain = _host(url)
+    path = _path(url)
+    if path.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff")):
+        return True
+    if any(domain.endswith(host) for host in ("i.redd.it", "i.imgur.com", "preview.redd.it", "external-preview.redd.it")):
+        return True
+    return False
 
 
 def _infer_media_extension(url: str) -> str:
     """
-    Pick a sensible extension for extensionless media URLs.
+    Pick a sensible extension for the initial save path.
+    yt-dlp may still override this when it merges into mp4.
     """
     try:
         parsed = urlparse(url or "")
@@ -73,10 +116,10 @@ def _infer_media_extension(url: str) -> str:
         if "v.redd.it" in domain:
             return ".mp4"
 
-        if domain.endswith(("redgifs.com", "gfycat.com")):
+        if domain.endswith(("redgifs.com", "gfycat.com", "giphy.com", "streamable.com")):
             return ".mp4"
 
-        if domain.endswith(("i.redd.it", "preview.redd.it", "external-preview.redd.it")):
+        if domain.endswith(("i.redd.it", "preview.redd.it", "external-preview.redd.it", "i.imgur.com")):
             return ".jpg"
 
         return ".jpg"
@@ -85,17 +128,20 @@ def _infer_media_extension(url: str) -> str:
 
 
 class MediaDownloadManager:
+    """
+    Central coordinator for media downloads.
+
+    Reddit-hosted media goes through RedditMediaDownloader.
+    External video/GIF hosts go through yt-dlp when available so audio can be
+    preserved and merged. Fallback is plain requests.
+    """
+
     def __init__(self):
         self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         self._url_lock = threading.Lock()
         self._downloaded_urls: Dict[str, str] = {}
         self._failed_urls: Dict[str, int] = {}
-
-        try:
-            self._reddit_downloader = RedditMediaDownloader()
-        except Exception as exc:
-            self._logger.warning(f"Reddit media downloader unavailable: {exc}")
-            self._reddit_downloader = None
+        self._reddit_downloader = RedditMediaDownloader()
 
     def _should_skip_url(self, url: str) -> bool:
         return self._failed_urls.get(url, 0) >= 2
@@ -121,9 +167,75 @@ class MediaDownloadManager:
             self._logger.debug(f"Generic download failed for {url}: {exc}")
             return None
 
+    def _download_with_ytdlp(self, url: str, save_path: str) -> Optional[str]:
+        if not YT_DLP_AVAILABLE:
+            return None
+
+        try:
+            output_dir = os.path.dirname(save_path) or "."
+            base_name = os.path.splitext(os.path.basename(save_path))[0]
+            outtmpl = os.path.join(output_dir, f"{base_name}.%(ext)s")
+
+            options = {
+                "outtmpl": outtmpl,
+                "format": "bv*+ba/b",
+                "merge_output_format": "mp4",
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+                "retries": 3,
+                "socket_timeout": 30,
+                "paths": {"home": output_dir},
+            }
+
+            os.makedirs(output_dir, exist_ok=True)
+
+            with yt_dlp.YoutubeDL(options) as ydl:  # type: ignore[attr-defined]
+                ydl.extract_info(url, download=True)
+
+            candidates = []
+            for pattern in (
+                os.path.join(output_dir, f"{base_name}.*"),
+                os.path.join(output_dir, f"{base_name}*.mp4"),
+                os.path.join(output_dir, f"{base_name}*.webm"),
+                os.path.join(output_dir, f"{base_name}*.mkv"),
+                os.path.join(output_dir, f"{base_name}*.mov"),
+            ):
+                candidates.extend(glob.glob(pattern))
+
+            candidates = [
+                path
+                for path in candidates
+                if os.path.isfile(path) and not path.endswith(".part") and not path.endswith(".ytdl")
+            ]
+
+            if not candidates:
+                if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
+                    return save_path
+                return None
+
+            candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            final_path = candidates[0]
+
+            if final_path != save_path:
+                try:
+                    if os.path.exists(save_path):
+                        os.remove(save_path)
+                    os.replace(final_path, save_path)
+                    final_path = save_path
+                except Exception:
+                    pass
+
+            if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
+                return final_path
+            return None
+        except Exception as exc:
+            self._logger.debug(f"yt-dlp download failed for {url}: {exc}")
+            return None
+
     def download_media(self, url: str, save_path: str) -> Optional[str]:
         """
-        Download media and return the saved file path, or None on failure.
+        Download media and return the saved file path.
         """
         if not url or not save_path:
             return None
@@ -139,7 +251,7 @@ class MediaDownloadManager:
                 self._downloaded_urls.pop(url, None)
 
         try:
-            if _looks_like_media_host(url) and self._reddit_downloader is not None:
+            if _is_reddit_media(url):
                 result = self._reddit_downloader.download(url, save_path)
                 if getattr(result, "is_success", False) and getattr(result, "local_path", None):
                     local_path = result.local_path
@@ -147,9 +259,32 @@ class MediaDownloadManager:
                         self._downloaded_urls[url] = local_path
                     return local_path
 
-                self._logger.debug(
-                    f"Advanced downloader failed for {url}: {getattr(result, 'error_message', None)}"
-                )
+                self._record_failure(url)
+                return None
+
+            if _is_video_page(url):
+                local_path = self._download_with_ytdlp(url, save_path)
+                if local_path:
+                    with self._url_lock:
+                        self._downloaded_urls[url] = local_path
+                    return local_path
+
+                local_path = self._download_with_requests(url, save_path)
+                if local_path:
+                    with self._url_lock:
+                        self._downloaded_urls[url] = local_path
+                    return local_path
+
+                self._record_failure(url)
+                return None
+
+            if _is_direct_image(url):
+                local_path = self._download_with_requests(url, save_path)
+                if local_path:
+                    with self._url_lock:
+                        self._downloaded_urls[url] = local_path
+                    return local_path
+
                 self._record_failure(url)
                 return None
 
@@ -170,6 +305,7 @@ class MediaDownloadManager:
     def get_service_health(self) -> Dict[str, Any]:
         return {
             "reddit_downloader": self._reddit_downloader is not None,
+            "yt_dlp_available": YT_DLP_AVAILABLE,
             "cached_urls": len(self._downloaded_urls),
             "failed_urls": len(self._failed_urls),
         }
@@ -177,6 +313,8 @@ class MediaDownloadManager:
     def is_service_available(self, service_name: str) -> bool:
         if service_name == "reddit":
             return self._reddit_downloader is not None
+        if service_name == "yt_dlp":
+            return YT_DLP_AVAILABLE
         return True
 
     def reset_service(self, service_name: str) -> None:
@@ -202,7 +340,7 @@ def get_media_manager() -> MediaDownloadManager:
 
 def download_media_file(url: str, save_directory: str, file_id: str) -> Optional[str]:
     """
-    Convenience wrapper used by save_utils.py.
+    Convenience wrapper for the rest of the codebase.
     """
     if not url or not save_directory or not file_id:
         return None
