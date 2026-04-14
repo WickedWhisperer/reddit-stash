@@ -32,6 +32,8 @@ except Exception:
     RedgifsAPI = None
     REDGIFS_AVAILABLE = False
 
+REDGIFS_TRACE = os.getenv("REDGIFS_TRACE", "1").lower() not in {"0", "false", "no", "off"}
+
 
 REDDIT_MEDIA_HOSTS = (
     "i.redd.it",
@@ -410,6 +412,12 @@ class MediaDownloadManager:
         except Exception:
             return False
 
+    def _trace_redgifs(self, message: str) -> None:
+        text = f"[RedGifs] {message}"
+        if REDGIFS_TRACE:
+            print(text, flush=True)
+        self._logger.info(text)
+
     def _fetch_html(self, url: str) -> Optional[str]:
         try:
             response = requests.get(
@@ -498,6 +506,7 @@ class MediaDownloadManager:
         save_path: str,
         require_audio: bool,
         referer: Optional[str] = None,
+        label: str = "candidate",
     ) -> Optional[str]:
         """
         Try candidate URLs in order. If require_audio is True, only accept a file
@@ -506,6 +515,10 @@ class MediaDownloadManager:
         first_silent: Optional[str] = None
 
         for candidate in candidates:
+            self._trace_redgifs(
+                f"trying {label}: {candidate} | require_audio={require_audio} | referer={referer or 'none'}"
+            )
+
             downloaded = None
 
             if _looks_like_manifest(candidate):
@@ -514,16 +527,24 @@ class MediaDownloadManager:
                 downloaded = self._download_with_requests(candidate, save_path, referer=referer)
 
             if not downloaded:
+                self._trace_redgifs(f"failed {label}: {candidate}")
                 continue
 
+            has_audio_stream = self._has_audio_stream(downloaded)
+            self._trace_redgifs(
+                f"downloaded {label}: {candidate} -> {downloaded} | audio_stream={has_audio_stream}"
+            )
+
             if require_audio:
-                if self._has_audio_stream(downloaded):
+                if has_audio_stream:
+                    self._trace_redgifs(f"accepted audio {label}: {candidate}")
                     return downloaded
 
                 if first_silent is None:
                     first_silent = downloaded
                 continue
 
+            self._trace_redgifs(f"accepted {label}: {candidate}")
             return downloaded
 
         return first_silent if not require_audio else None
@@ -556,7 +577,7 @@ class MediaDownloadManager:
 
             if gif:
                 has_audio = bool(getattr(gif, "has_audio", False))
-                self._logger.info(f"RedGifs clip {gif_id}: has_audio={has_audio}")
+                self._trace_redgifs(f"clip {gif_id}: has_audio={has_audio}")
                 urls_obj = getattr(gif, "urls", None)
                 page_urls = _dedupe_urls(
                     page_urls
@@ -566,11 +587,14 @@ class MediaDownloadManager:
                     ]
                 )
 
+        self._trace_redgifs(f"page urls for {gif_id or url}: {page_urls}")
+
         manifest_candidates: List[str] = []
         audio_candidates: List[str] = []
         fallback_candidates: List[str] = []
 
         for page_url in page_urls:
+            self._trace_redgifs(f"fetching page html: {page_url}")
             html_text = self._fetch_html(page_url)
             if not html_text:
                 continue
@@ -584,23 +608,33 @@ class MediaDownloadManager:
         audio_candidates = _dedupe_urls(audio_candidates)
         fallback_candidates = _dedupe_urls(fallback_candidates)
 
+        self._trace_redgifs(f"manifests: {manifest_candidates}")
+        self._trace_redgifs(f"audio candidates: {audio_candidates}")
+        self._trace_redgifs(f"fallback candidates: {fallback_candidates}")
+
+        referer = page_urls[0] if page_urls else None
+
         if has_audio:
             audio_first = self._download_redgifs_candidates(
                 audio_candidates,
                 save_path,
                 require_audio=True,
-                referer=page_urls[0] if page_urls else None,
+                referer=referer,
+                label="audio-candidate",
             )
             if audio_first:
+                self._trace_redgifs(f"final selected audio file for {gif_id}: {audio_first}")
                 return audio_first
 
             manifest_first = self._download_redgifs_candidates(
                 manifest_candidates,
                 save_path,
                 require_audio=True,
-                referer=page_urls[0] if page_urls else None,
+                referer=referer,
+                label="manifest",
             )
             if manifest_first:
+                self._trace_redgifs(f"final selected manifest file for {gif_id}: {manifest_first}")
                 return manifest_first
 
             direct_media_candidates = []
@@ -609,16 +643,23 @@ class MediaDownloadManager:
                     direct_media_candidates.append(candidate)
 
             for candidate in direct_media_candidates:
+                self._trace_redgifs(f"trying direct-media fallback: {candidate}")
                 downloaded = self._download_with_requests(
                     candidate,
                     save_path,
-                    referer=page_urls[0] if page_urls else None,
+                    referer=referer,
                 )
-                if downloaded and self._has_audio_stream(downloaded):
-                    return downloaded
+                if downloaded:
+                    has_audio_stream = self._has_audio_stream(downloaded)
+                    self._trace_redgifs(
+                        f"direct-media fallback downloaded {candidate} -> {downloaded} | audio_stream={has_audio_stream}"
+                    )
+                    if has_audio_stream:
+                        self._trace_redgifs(f"final selected direct-media file for {gif_id}: {downloaded}")
+                        return downloaded
 
-            self._logger.warning(
-                f"RedGifs clip {gif_id} reported audio, but no extracted candidate contained an audio stream"
+            self._trace_redgifs(
+                f"clip {gif_id} reported audio, but no extracted candidate contained an audio stream"
             )
             return None
 
@@ -626,36 +667,44 @@ class MediaDownloadManager:
             audio_candidates,
             save_path,
             require_audio=False,
-            referer=page_urls[0] if page_urls else None,
+            referer=referer,
+            label="audio-candidate",
         )
         if no_audio_first:
+            self._trace_redgifs(f"final selected file for {gif_id}: {no_audio_first}")
             return no_audio_first
 
         no_audio_first = self._download_redgifs_candidates(
             manifest_candidates,
             save_path,
             require_audio=False,
-            referer=page_urls[0] if page_urls else None,
+            referer=referer,
+            label="manifest",
         )
         if no_audio_first:
+            self._trace_redgifs(f"final selected manifest file for {gif_id}: {no_audio_first}")
             return no_audio_first
 
         no_audio_first = self._download_redgifs_candidates(
             fallback_candidates,
             save_path,
             require_audio=False,
-            referer=page_urls[0] if page_urls else None,
+            referer=referer,
+            label="fallback",
         )
         if no_audio_first:
+            self._trace_redgifs(f"final selected fallback file for {gif_id}: {no_audio_first}")
             return no_audio_first
 
         for candidate in page_urls:
+            self._trace_redgifs(f"yt-dlp on page url: {candidate}")
             downloaded = self._download_with_ytdlp(candidate, save_path, referer=candidate)
             if downloaded:
+                self._trace_redgifs(f"final selected page-url file for {gif_id}: {downloaded}")
                 return downloaded
 
+        self._trace_redgifs(f"no RedGifs source succeeded for {gif_id or url}")
         return None
-
     def download_media(self, url: str, save_path: str) -> Optional[str]:
         """
         Download media and return the saved file path, or None on failure.
@@ -795,4 +844,4 @@ def download_media_file(url: str, save_directory: str, file_id: str) -> Optional
     except Exception as exc:
         logging.error(f"Error in download_media_file for {url}: {exc}")
         return None
-        
+            
