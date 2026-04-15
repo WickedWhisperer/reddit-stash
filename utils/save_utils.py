@@ -144,9 +144,17 @@ def _is_image_url(url):
 
 def _extract_reddit_video_url(submission) -> Optional[str]:
     """
-    Prefer richer Reddit video sources first.
+    Preserve external video hosts exactly as-is.
+
+    Only Reddit-hosted posts should be rewritten through reddit_video / preview
+    metadata. External hosts like RedGifs must keep their original URL so the
+    dedicated RedGifs path can resolve the audio-bearing source.
     """
     url = _normalize_url(getattr(submission, "url", "") or "")
+    host = _host(url)
+
+    if _is_external_video_host(url):
+        return url
 
     for media_attr in ("media", "secure_media"):
         media = getattr(submission, media_attr, None)
@@ -166,9 +174,6 @@ def _extract_reddit_video_url(submission) -> Optional[str]:
                 candidate = reddit_video_preview.get(key)
                 if candidate:
                     return _normalize_url(candidate)
-
-    if _host(url).endswith(("redgifs.com", "gfycat.com", "giphy.com", "streamable.com")):
-        return url
 
     try:
         parsed = urlparse(url)
