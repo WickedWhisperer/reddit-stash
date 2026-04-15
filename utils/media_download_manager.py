@@ -5,7 +5,6 @@ import logging
 import os
 import re
 import subprocess
-import tempfile
 import threading
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -24,7 +23,7 @@ except Exception:
     yt_dlp = None
     YT_DLP_AVAILABLE = False
 
-REDGIFS_TRACE = os.getenv("REDGIFS_TRACE", "0").strip().lower() not in {
+REDGIFS_TRACE = os.getenv("REDGIFS_TRACE", "1").strip().lower() not in {
     "0",
     "false",
     "no",
@@ -199,16 +198,6 @@ def _extract_urls_from_text(text: str) -> List[str]:
         if url:
             urls.append(url)
     return urls
-
-
-def _is_probable_manifest_or_media(url: str) -> bool:
-    u = url.lower()
-    domain = _host(url)
-    if any(token in u for token in (".m3u8", ".mpd", ".mp4", ".webm", ".mov", ".mkv")):
-        return True
-    if any(domain.endswith(host) for host in REDGIFS_HOSTS):
-        return True
-    return False
 
 
 def _fetch_html(url: str) -> str:
