@@ -21,7 +21,7 @@ from utils.time_utilities import lazy_load_comments
 logger = logging.getLogger(__name__)
 _media_size_local = threading.local()
 
-_MEDIA_TRACE = os.getenv("MEDIA_TRACE", "1").strip().lower() not in {
+_MEDIA_TRACE = os.getenv("MEDIA_TRACE", "0").strip().lower() not in {
     "0",
     "false",
     "no",
@@ -144,16 +144,9 @@ def _is_image_url(url):
 
 def _extract_reddit_video_url(submission) -> Optional[str]:
     """
-    Only use Reddit media fields for reddit-hosted videos.
-
-    For external hosts like RedGifs, Gfycat, Giphy, or Streamable, the original
-    URL must be preserved so the correct extractor sees the real source.
+    Prefer richer Reddit video sources first.
     """
     url = _normalize_url(getattr(submission, "url", "") or "")
-    host = _host(url)
-
-    if _is_external_video_host(url):
-        return url
 
     for media_attr in ("media", "secure_media"):
         media = getattr(submission, media_attr, None)
@@ -173,6 +166,9 @@ def _extract_reddit_video_url(submission) -> Optional[str]:
                 candidate = reddit_video_preview.get(key)
                 if candidate:
                     return _normalize_url(candidate)
+
+    if _host(url).endswith(("redgifs.com", "gfycat.com", "giphy.com", "streamable.com")):
+        return url
 
     try:
         parsed = urlparse(url)
@@ -219,11 +215,15 @@ def _is_video_like_submission(submission):
     """
     try:
         url = _normalize_url(getattr(submission, "url", "") or "")
+        host = _host(url)
 
         if _is_video_url(url):
             return True
 
         if getattr(submission, "is_video", False):
+            return True
+
+        if host.endswith(("redgifs.com", "gfycat.com", "giphy.com", "streamable.com")):
             return True
 
         for media_attr in ("media", "secure_media"):
