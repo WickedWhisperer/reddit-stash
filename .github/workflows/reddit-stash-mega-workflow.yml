@@ -92,6 +92,9 @@ jobs:
           REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
           REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
           IMGUR_CLIENT_IDS: ${{ secrets.IMGUR_CLIENT_IDS }}
+          REDGIFS_TRACE: "1"
+          MEDIA_TRACE: "1"
+          PYTHONUNBUFFERED: "1"
         run: |
           python storage_utils.py --download
           python reddit_stash.py
@@ -103,4 +106,3 @@ jobs:
           MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
         run: |
           python storage_utils.py --upload
-          
