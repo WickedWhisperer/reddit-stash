@@ -20,6 +20,13 @@ from utils.time_utilities import lazy_load_comments
 
 logger = logging.getLogger(__name__)
 _media_size_local = threading.local()
+_MEDIA_TRACE = os.getenv("MEDIA_TRACE", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _trace_media(message: str) -> None:
+    if _MEDIA_TRACE:
+        print(f"[Media] {message}", flush=True)
+        logger.info(message)
 
 
 def format_date(timestamp):
@@ -52,15 +59,15 @@ def _normalize_url(url: str) -> str:
     return html.unescape(url or "").strip()
 
 
+def _clean_url(url: str) -> str:
+    return (url or "").rstrip(").,!?]}>\"'")
+
+
 def _host(url: str) -> str:
     try:
         return urlparse(url or "").netloc.lower()
     except Exception:
         return ""
-
-
-def _clean_url(url: str) -> str:
-    return (url or "").rstrip(").,!?]}>\"'")
 
 
 def _is_gif_url(url):
@@ -81,7 +88,6 @@ def _is_video_url(url):
         parsed = urlparse(url)
         domain = parsed.netloc.lower()
         path = parsed.path.lower()
-
         return (
             "v.redd.it" in domain
             or domain.endswith(("redgifs.com", "gfycat.com", "giphy.com", "streamable.com"))
@@ -123,9 +129,6 @@ def _is_image_url(url):
 
 
 def _extract_reddit_video_url(submission) -> Optional[str]:
-    """
-    Prefer richer Reddit video sources first.
-    """
     url = _normalize_url(getattr(submission, "url", "") or "")
 
     for media_attr in ("media", "secure_media"):
@@ -190,9 +193,6 @@ def _extract_reddit_gif_url(submission) -> Optional[str]:
 
 
 def _is_video_like_submission(submission):
-    """
-    Covers Reddit-hosted video posts and video-backed GIF-like posts.
-    """
     try:
         url = _normalize_url(getattr(submission, "url", "") or "")
         host = _host(url)
@@ -221,7 +221,12 @@ def _is_video_like_submission(submission):
 
 
 def _get_video_download_url(submission):
-    return _extract_reddit_video_url(submission) or getattr(submission, "url", None)
+    url = _extract_reddit_video_url(submission) or getattr(submission, "url", None)
+    _trace_media(
+        f"Resolved video source for {getattr(submission, 'id', 'unknown')}: "
+        f"submission.url={getattr(submission, 'url', None)!r} -> video_url={url!r}"
+    )
+    return url
 
 
 def _track_media_size(size):
@@ -239,9 +244,6 @@ def _get_media_size():
 
 
 def _download_image_fallback(image_url, save_directory, submission_id, ignore_tls_errors=None):
-    """
-    Direct requests fallback for normal image URLs only.
-    """
     try:
         if ignore_tls_errors is None:
             ignore_tls_errors = get_ignore_tls_errors()
@@ -263,19 +265,7 @@ def _download_image_fallback(image_url, save_directory, submission_id, ignore_tl
             extension = ".html"
         else:
             extension = os.path.splitext(urlparse(image_url).path)[1]
-            if extension.lower() not in [
-                ".jpg",
-                ".jpeg",
-                ".png",
-                ".gif",
-                ".webp",
-                ".bmp",
-                ".tiff",
-                ".mp4",
-                ".webm",
-                ".mov",
-                ".mkv",
-            ]:
+            if extension.lower() not in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".mp4", ".webm", ".mov", ".mkv"]:
                 extension = ".jpg"
 
         image_filename = f"{submission_id}{extension}"
@@ -298,24 +288,23 @@ def _download_image_fallback(image_url, save_directory, submission_id, ignore_tl
 
 
 def download_image(image_url, save_directory, submission_id, ignore_tls_errors=None):
-    """
-    Download a media file and save it locally.
-
-    For video-like URLs, do not fall back to a raw request if the media manager
-    fails, because that can silently bypass audio-aware source selection.
-    """
     try:
         from .media_download_manager import download_media_file
+
+        _trace_media(f"download_image() input={image_url!r} id={submission_id!r}")
 
         result_path = download_media_file(image_url, save_directory, submission_id)
         if result_path:
             try:
                 file_size = os.path.getsize(result_path)
+                _trace_media(f"download_image() saved={result_path!r}")
                 return result_path, file_size
             except OSError:
                 return result_path, 0
 
+        # Do NOT silently fall back for anything that looks like video/RedGifs.
         if _is_video_url(image_url):
+            _trace_media(f"download_image() refused raw fallback for video-like URL={image_url!r}")
             return None, 0
 
         fallback_path, fallback_size = _download_image_fallback(
@@ -331,9 +320,13 @@ def download_image(image_url, save_directory, submission_id, ignore_tls_errors=N
 
 
 def _save_submission_media(submission, f, is_recovered, media_config, save_dir, ignore_tls_errors, context_mode):
-    """
-    Handle media detection and download for a submission's link post.
-    """
+    _trace_media(
+        f"submission={getattr(submission, 'id', 'unknown')} "
+        f"url={getattr(submission, 'url', None)!r} "
+        f"is_video={getattr(submission, 'is_video', None)!r} "
+        f"is_gallery={getattr(submission, 'is_gallery', None)!r}"
+    )
+
     if (
         not is_recovered
         and hasattr(submission, "is_gallery")
@@ -347,7 +340,6 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
 
         try:
             from .media_services.reddit_media import RedditMediaDownloader
-
             extracted = RedditMediaDownloader.extract_media_urls_from_submission(submission)
         except Exception:
             extracted = []
@@ -362,6 +354,7 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
                 idx, info = args
                 gid = info.get("gallery_id", f"gallery_{idx}")
                 fid = f"{submission.id}_{gid}"
+                _trace_media(f"gallery item {fid} url={info['url']!r}")
                 return idx, download_image(info["url"], save_dir, fid, ignore_tls_errors)
 
             results = {}
@@ -406,6 +399,7 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
         if media_config.is_videos_enabled():
             video_url = _get_video_download_url(submission)
             if video_url:
+                _trace_media(f"video branch chose URL={video_url!r}")
                 video_path, video_size = download_image(
                     video_url,
                     save_dir,
@@ -426,6 +420,7 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
 
     gif_url = _extract_reddit_gif_url(submission)
     if gif_url:
+        _trace_media(f"gif branch chose URL={gif_url!r}")
         if media_config.is_gifs_enabled():
             gif_path, gif_size = download_image(
                 gif_url,
@@ -445,6 +440,7 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
 
     image_url = getattr(submission, "url", "") or ""
     if _is_image_url(image_url):
+        _trace_media(f"image branch chose URL={image_url!r}")
         if media_config.is_images_enabled():
             image_path, image_size = download_image(
                 image_url,
@@ -534,12 +530,7 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
 
         f.write("\n\n## Comments:\n\n")
         lazy_comments = lazy_load_comments(submission)
-        process_comments(
-            lazy_comments,
-            f,
-            ignore_tls_errors=ignore_tls_errors,
-            media_config=media_config if "media_config" in locals() else get_media_config(),
-        )
+        process_comments(lazy_comments, f, ignore_tls_errors=ignore_tls_errors, media_config=get_media_config())
 
         if unsave:
             try:
@@ -600,14 +591,7 @@ def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, r
 
         if comment.replies:
             f.write("\n\n## Child Comments:\n\n")
-            process_comments(
-                comment.replies,
-                f,
-                depth=0,
-                simple_format=False,
-                ignore_tls_errors=ignore_tls_errors,
-                media_config=get_media_config(),
-            )
+            process_comments(comment.replies, f, depth=0, simple_format=False, ignore_tls_errors=ignore_tls_errors, media_config=get_media_config())
 
         if unsave:
             try:
@@ -649,6 +633,7 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
                         image_url = potential_url
 
             if video_url:
+                _trace_media(f"comment video branch chose URL={video_url!r}")
                 body_before_url = comment_body[: comment_body.rfind(words[-1])].strip()
                 if body_before_url:
                     for line in body_before_url.split("\n"):
@@ -672,6 +657,7 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
                     f.write(f"{bq}[Video]({video_url})\n\n")
 
             elif gif_url:
+                _trace_media(f"comment gif branch chose URL={gif_url!r}")
                 body_before_url = comment_body[: comment_body.rfind(words[-1])].strip()
                 if body_before_url:
                     for line in body_before_url.split("\n"):
@@ -695,6 +681,7 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
                     f.write(f"{bq}[GIF]({gif_url})\n\n")
 
             elif image_url:
+                _trace_media(f"comment image branch chose URL={image_url!r}")
                 body_before_url = comment_body[: comment_body.rfind(words[-1])].strip()
                 if body_before_url:
                     for line in body_before_url.split("\n"):
@@ -723,14 +710,7 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
                 f.write("\n")
 
             if not simple_format and comment.replies:
-                process_comments(
-                    comment.replies,
-                    f,
-                    depth + 1,
-                    simple_format,
-                    ignore_tls_errors,
-                    media_config=media_config,
-                )
+                process_comments(comment.replies, f, depth + 1, simple_format, ignore_tls_errors, media_config=media_config)
 
         if depth == 0:
             f.write("---\n")
