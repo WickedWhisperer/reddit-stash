@@ -24,8 +24,7 @@ except Exception:
     yt_dlp = None
     YT_DLP_AVAILABLE = False
 
-
-REDGIFS_TRACE = os.getenv("REDGIFS_TRACE", "1").strip().lower() not in {
+REDGIFS_TRACE = os.getenv("REDGIFS_TRACE", "0").strip().lower() not in {
     "0",
     "false",
     "no",
