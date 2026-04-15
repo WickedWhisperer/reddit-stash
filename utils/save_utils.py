@@ -20,7 +20,13 @@ from utils.time_utilities import lazy_load_comments
 
 logger = logging.getLogger(__name__)
 _media_size_local = threading.local()
-_MEDIA_TRACE = os.getenv("MEDIA_TRACE", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+_MEDIA_TRACE = os.getenv("MEDIA_TRACE", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 
 
 def _trace_media(message: str) -> None:
@@ -70,6 +76,14 @@ def _host(url: str) -> str:
         return ""
 
 
+def _is_external_video_host(url: str) -> bool:
+    try:
+        domain = _host(url)
+        return domain.endswith(("redgifs.com", "gfycat.com", "giphy.com", "streamable.com"))
+    except Exception:
+        return False
+
+
 def _is_gif_url(url):
     if not url:
         return False
@@ -90,7 +104,7 @@ def _is_video_url(url):
         path = parsed.path.lower()
         return (
             "v.redd.it" in domain
-            or domain.endswith(("redgifs.com", "gfycat.com", "giphy.com", "streamable.com"))
+            or _is_external_video_host(url)
             or path.endswith((".mp4", ".webm", ".mov", ".mkv", ".m3u8", ".mpd"))
             or path.endswith(".gifv")
         )
@@ -129,7 +143,17 @@ def _is_image_url(url):
 
 
 def _extract_reddit_video_url(submission) -> Optional[str]:
+    """
+    Only use Reddit media fields for reddit-hosted videos.
+
+    For external hosts like RedGifs, Gfycat, Giphy, or Streamable, the original
+    URL must be preserved so the correct extractor sees the real source.
+    """
     url = _normalize_url(getattr(submission, "url", "") or "")
+    host = _host(url)
+
+    if _is_external_video_host(url):
+        return url
 
     for media_attr in ("media", "secure_media"):
         media = getattr(submission, media_attr, None)
@@ -149,9 +173,6 @@ def _extract_reddit_video_url(submission) -> Optional[str]:
                 candidate = reddit_video_preview.get(key)
                 if candidate:
                     return _normalize_url(candidate)
-
-    if _host(url).endswith(("redgifs.com", "gfycat.com", "giphy.com", "streamable.com")):
-        return url
 
     try:
         parsed = urlparse(url)
@@ -193,17 +214,16 @@ def _extract_reddit_gif_url(submission) -> Optional[str]:
 
 
 def _is_video_like_submission(submission):
+    """
+    Covers Reddit-hosted video posts and video-backed GIF-like posts.
+    """
     try:
         url = _normalize_url(getattr(submission, "url", "") or "")
-        host = _host(url)
 
         if _is_video_url(url):
             return True
 
         if getattr(submission, "is_video", False):
-            return True
-
-        if host.endswith(("redgifs.com", "gfycat.com", "giphy.com", "streamable.com")):
             return True
 
         for media_attr in ("media", "secure_media"):
@@ -244,6 +264,9 @@ def _get_media_size():
 
 
 def _download_image_fallback(image_url, save_directory, submission_id, ignore_tls_errors=None):
+    """
+    Direct requests fallback for normal image URLs only.
+    """
     try:
         if ignore_tls_errors is None:
             ignore_tls_errors = get_ignore_tls_errors()
@@ -265,7 +288,19 @@ def _download_image_fallback(image_url, save_directory, submission_id, ignore_tl
             extension = ".html"
         else:
             extension = os.path.splitext(urlparse(image_url).path)[1]
-            if extension.lower() not in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".mp4", ".webm", ".mov", ".mkv"]:
+            if extension.lower() not in [
+                ".jpg",
+                ".jpeg",
+                ".png",
+                ".gif",
+                ".webp",
+                ".bmp",
+                ".tiff",
+                ".mp4",
+                ".webm",
+                ".mov",
+                ".mkv",
+            ]:
                 extension = ".jpg"
 
         image_filename = f"{submission_id}{extension}"
@@ -288,6 +323,12 @@ def _download_image_fallback(image_url, save_directory, submission_id, ignore_tl
 
 
 def download_image(image_url, save_directory, submission_id, ignore_tls_errors=None):
+    """
+    Download a media file and save it locally.
+
+    Do not fall back to raw requests for video-like URLs, because that can
+    bypass the source-selection logic needed for audio-bearing RedGifs.
+    """
     try:
         from .media_download_manager import download_media_file
 
@@ -302,7 +343,6 @@ def download_image(image_url, save_directory, submission_id, ignore_tls_errors=N
             except OSError:
                 return result_path, 0
 
-        # Do NOT silently fall back for anything that looks like video/RedGifs.
         if _is_video_url(image_url):
             _trace_media(f"download_image() refused raw fallback for video-like URL={image_url!r}")
             return None, 0
@@ -320,6 +360,9 @@ def download_image(image_url, save_directory, submission_id, ignore_tls_errors=N
 
 
 def _save_submission_media(submission, f, is_recovered, media_config, save_dir, ignore_tls_errors, context_mode):
+    """
+    Handle media detection and download for a submission's link post.
+    """
     _trace_media(
         f"submission={getattr(submission, 'id', 'unknown')} "
         f"url={getattr(submission, 'url', None)!r} "
@@ -340,6 +383,7 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
 
         try:
             from .media_services.reddit_media import RedditMediaDownloader
+
             extracted = RedditMediaDownloader.extract_media_urls_from_submission(submission)
         except Exception:
             extracted = []
@@ -467,6 +511,9 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
 
 
 def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None, context_mode=False):
+    """
+    Save a submission and its metadata, optionally unsaving it after.
+    """
     try:
         is_recovered = isinstance(submission, RecoveredItem)
 
@@ -545,6 +592,9 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
 
 
 def save_comment_and_context(comment, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None):
+    """
+    Save a comment, its context, and any child comments.
+    """
     try:
         is_recovered = isinstance(comment, RecoveredItem)
 
