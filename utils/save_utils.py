@@ -21,7 +21,7 @@ from utils.time_utilities import lazy_load_comments
 logger = logging.getLogger(__name__)
 _media_size_local = threading.local()
 
-_MEDIA_TRACE = os.getenv("MEDIA_TRACE", "0").strip().lower() not in {
+_MEDIA_TRACE = os.getenv("MEDIA_TRACE", "1").strip().lower() not in {
     "0",
     "false",
     "no",
