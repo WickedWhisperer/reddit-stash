@@ -91,7 +91,7 @@ jobs:
 
       - name: Download from storage
         if: steps.storage.outputs.provider != 's3'
-        timeout-minutes: 2
+        timeout-minutes: 15
         env:
           STORAGE_PROVIDER: ${{ steps.storage.outputs.provider }}
           DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
