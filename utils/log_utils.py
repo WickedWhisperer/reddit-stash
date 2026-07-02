@@ -5,8 +5,9 @@ import threading
 
 from utils.constants import FILE_LOG_CHECKPOINT_INTERVAL
 
-# Lock protecting concurrent access to file_log dict and checkpoint writes
-_log_lock = threading.Lock()
+# RLock is needed because log_file() may call save_file_log() while already
+# holding the lock.
+_log_lock = threading.RLock()
 
 
 def get_log_file_path(save_directory):
@@ -15,26 +16,35 @@ def get_log_file_path(save_directory):
 
 
 def load_file_log(save_directory):
-    """Load the file log from a JSON file in the specified directory."""
+    """Load the file log from a JSON file in the specified directory.
+
+    If the log is missing, return an empty dict.
+    If the log exists but is corrupted, move it aside and start fresh.
+    """
     log_file_path = get_log_file_path(save_directory)
-    if os.path.exists(log_file_path):
+
+    if not os.path.exists(log_file_path):
+        return {}
+
+    try:
+        with open(log_file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        broken_path = f"{log_file_path}.broken"
         try:
-            with open(log_file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                return data if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, OSError):
-            broken_path = f"{log_file_path}.broken"
-            try:
-                os.replace(log_file_path, broken_path)
-                print(f"⚠️ Corrupted log moved to {broken_path}; starting with an empty log.")
-            except OSError:
-                print("⚠️ Corrupted log detected; starting with an empty log.")
-            return {}
-    return {}
+            os.replace(log_file_path, broken_path)
+            print(f"⚠️ Corrupted log moved to {broken_path}; starting with an empty log.")
+        except OSError:
+            print("⚠️ Corrupted log detected; starting with an empty log.")
+        return {}
 
 
 def save_file_log(log_data, save_directory):
-    """Save the file log to a JSON file in the specified directory."""
+    """Save the file log to a JSON file in the specified directory.
+
+    Writes atomically to avoid half-written JSON files.
+    """
     log_file_path = get_log_file_path(save_directory)
     os.makedirs(save_directory, exist_ok=True)
 
