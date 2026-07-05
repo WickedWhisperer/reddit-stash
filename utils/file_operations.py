@@ -66,7 +66,7 @@ def get_existing_files_from_dir(save_directory):
             filename = os.path.splitext(file)[0]
             subreddit_name = os.path.basename(root)
             content_type = None
-            
+
             if filename.startswith("POST_"):
                 file_id = filename.split("POST_")[1]
                 content_type = "Submission"
@@ -81,7 +81,7 @@ def get_existing_files_from_dir(save_directory):
                 content_type = "Comment"
             else:
                 continue
-            
+
             unique_key = f"{file_id}-{subreddit_name}-{content_type}"
             existing_files.add(unique_key)
     return existing_files
@@ -104,7 +104,7 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
 
     # Create the unique key including the content type and category
     unique_key = f"{file_id}-{subreddit_name}-{type(content).__name__}-{category}"
-    
+
     # If the file is already logged or exists in the directory, skip saving
     if unique_key in existing_files:
         return True, 0  # Indicate that the file already exists and no saving was performed, no media size
@@ -268,10 +268,7 @@ def _process_submissions_batch(submissions, save_directory, existing_files, crea
             pass
         handle_dynamic_sleep(submission)
 
-    return processed_count, skipped_count, total_size, total_media_size
-
-
-def _process_comments_batch(comments, save_directory, existing_files, created_dirs_cache,
+    return processed_count, skipped_count, total_size, total_media_sizedef _process_comments_batch(comments, save_directory, existing_files, created_dirs_cache,
                             file_log, ignore_tls_errors, category="COMMENT", unsave=False,
                             tqdm_desc="Processing Comments", tqdm_position=1):
     """Process a batch of comments in a single thread.
