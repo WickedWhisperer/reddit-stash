@@ -573,57 +573,99 @@ class RedditMediaDownloader:
         return getattr(submission, "url", None)
 
     @classmethod
-    def extract_media_urls_from_submission(cls, submission) -> List[Dict[str, Any]]:
-        """Extract all media URLs from a PRAW submission."""
-        media_urls: List[Dict[str, Any]] = []
+def extract_media_urls_from_submission(cls, submission) -> List[Dict[str, Any]]:
+    """Extract all media URLs from a PRAW submission."""
+    media_urls: List[Dict[str, Any]] = []
 
-        try:
-            if hasattr(submission, "is_reddit_media_domain") and submission.is_reddit_media_domain:
-                if hasattr(submission, "domain"):
-                    if submission.domain == "i.redd.it":
-                        media_urls.append(
-                            {"url": submission.url, "type": "image", "source": "reddit_direct"}
-                        )
-                    elif submission.domain == "v.redd.it":
-                        video_url = cls._get_best_reddit_video_url(submission)
-                        media_urls.append(
-                            {
-                                "url": video_url or submission.url,
-                                "type": "video",
-                                "source": "reddit_direct",
-                                "fallback_used": bool(video_url and video_url != submission.url),
-                            }
-                        )
+    try:
+        # Check if it's Reddit-hosted media
+        if hasattr(submission, "is_reddit_media_domain") and submission.is_reddit_media_domain:
+            if hasattr(submission, "domain"):
+                if submission.domain == "i.redd.it":
+                    # Reddit image
+                    media_urls.append({
+                        "url": submission.url,
+                        "type": "image",
+                        "source": "reddit_direct"
+                    })
 
-            if hasattr(submission, "is_gallery") and submission.is_gallery:
-                if hasattr(submission, "media_metadata") and submission.media_metadata:
-                    for item_id, metadata in submission.media_metadata.items():
-                        if "s" in metadata and "u" in metadata["s"]:
-                            gallery_url = metadata["s"]["u"].replace("&amp;", "&")
-                            media_urls.append(
-                                {
-                                    "url": gallery_url,
-                                    "type": "image",
-                                    "source": "reddit_gallery",
-                                    "gallery_id": item_id,
-                                }
-                            )
+                elif submission.domain == "v.redd.it":
+                    # Reddit video
+                    video_url = cls._get_best_reddit_video_url(submission)
+                    media_urls.append({
+                        "url": video_url or submission.url,
+                        "type": "video",
+                        "source": "reddit_direct",
+                        "fallback_used": bool(video_url and video_url != submission.url),
+                    })
 
-            if hasattr(submission, "preview") and submission.preview and "images" in submission.preview:
-                for image in submission.preview["images"]:
-                    if "source" in image:
-                        preview_url = image["source"]["url"].replace("&amp;", "&")
-                        media_urls.append(
-                            {
-                                "url": preview_url,
-                                "type": "image",
-                                "source": "reddit_preview",
-                                "width": image["source"].get("width"),
-                                "height": image["source"].get("height"),
-                            }
-                        )
+        # Check for gallery posts
+        gallery_urls_added = False
+        if hasattr(submission, "is_gallery") and submission.is_gallery:
+            gallery_data = getattr(submission, "gallery_data", None)
+            media_metadata = getattr(submission, "media_metadata", None) or {}
 
-        except Exception as e:
-            logging.getLogger(__name__).warning(f"Error extracting media URLs from submission: {e}")
+            ordered_gallery_ids = []
 
-        return media_urls
+            # Preferred source: gallery_data preserves the original displayed order
+            if isinstance(gallery_data, dict):
+                for item in gallery_data.get("items", []):
+                    if not isinstance(item, dict):
+                        continue
+                    media_id = item.get("media_id") or item.get("id") or item.get("mediaId")
+                    if media_id:
+                        ordered_gallery_ids.append(media_id)
+
+            # Fallback only if gallery_data is missing
+            if not ordered_gallery_ids and media_metadata:
+                ordered_gallery_ids = list(media_metadata.keys())
+
+            seen_urls = set()
+            for media_id in ordered_gallery_ids:
+                metadata = media_metadata.get(media_id)
+                if not isinstance(metadata, dict):
+                    continue
+
+                source = metadata.get("s")
+                if not isinstance(source, dict):
+                    continue
+
+                gallery_url = source.get("u")
+                if not gallery_url:
+                    continue
+
+                gallery_url = gallery_url.replace("&amp;", "&")
+
+                if gallery_url in seen_urls:
+                    continue
+                seen_urls.add(gallery_url)
+
+                media_urls.append({
+                    "url": gallery_url,
+                    "type": "image",
+                    "source": "reddit_gallery",
+                    "gallery_id": media_id
+                })
+                gallery_urls_added = True
+
+        # Check for preview images (fallback for external links)
+        # Do not append these after a gallery if the gallery URLs were already extracted,
+        # because that can scramble the visible order and duplicate gallery images.
+        if (not hasattr(submission, "is_gallery") or not submission.is_gallery or not gallery_urls_added) \
+           and hasattr(submission, "preview") and submission.preview and "images" in submission.preview:
+            for image in submission.preview["images"]:
+                if "source" in image:
+                    preview_url = image["source"]["url"].replace("&amp;", "&")
+                    media_urls.append({
+                        "url": preview_url,
+                        "type": "image",
+                        "source": "reddit_preview",
+                        "width": image["source"].get("width"),
+                        "height": image["source"].get("height")
+                    })
+
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Error extracting media URLs from submission: {e}")
+
+    return media_urls
