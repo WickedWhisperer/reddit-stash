@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Lock protecting concurrent access to created_dirs_cache (check-then-create pattern)
 _dir_cache_lock = threading.Lock()
+
 _MEDIA_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff",
     ".mp4", ".webm", ".mov", ".mkv", ".m4v", ".avi",
@@ -50,6 +51,7 @@ def _submission_media_assets_present(file_path: str, item_id: str) -> bool:
         return False
 
     return False
+
 # Dynamically determine the path to the root directory
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -136,7 +138,7 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
     # Create the unique key including the content type and category
     unique_key = f"{file_id}-{subreddit_name}-{type(content).__name__}-{category}"
 
-        # If the file is already logged or exists in the directory, skip saving
+    # If the file is already logged or exists in the directory, skip saving
     # only when the submission's media is already present too.
     if unique_key in existing_files:
         if getattr(save_function, "__name__", "") != "save_submission":
@@ -308,7 +310,10 @@ def _process_submissions_batch(submissions, save_directory, existing_files, crea
             pass
         handle_dynamic_sleep(submission)
 
-    return processed_count, skipped_count, total_size, total_media_sizedef _process_comments_batch(comments, save_directory, existing_files, created_dirs_cache,
+    return processed_count, skipped_count, total_size, total_media_size
+
+
+def _process_comments_batch(comments, save_directory, existing_files, created_dirs_cache,
                             file_log, ignore_tls_errors, category="COMMENT", unsave=False,
                             tqdm_desc="Processing Comments", tqdm_position=1):
     """Process a batch of comments in a single thread.
@@ -526,3 +531,4 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
     save_file_log(file_log, save_directory)
 
     return processed_count, skipped_count, total_size, total_media_size
+    
