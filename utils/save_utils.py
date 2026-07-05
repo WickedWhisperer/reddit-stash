@@ -368,8 +368,6 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
     """
     Handle media detection and download for a submission's link post.
     """
-    submission_url = _normalize_url(getattr(submission, "url", "") or "")
-
     _trace_media(
         f"submission={getattr(submission, 'id', 'unknown')} "
         f"url={getattr(submission, 'url', None)!r} "
@@ -384,13 +382,13 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
     ):
         if not media_config.is_albums_enabled() or not media_config.is_images_enabled():
             f.write(
-                f"**Gallery post** (image downloads disabled): "
-                f"[View on Reddit](https://reddit.com{submission.permalink})\n"
+                f"**Gallery post** (image downloads disabled): [View on Reddit](https://reddit.com{submission.permalink})\n"
             )
             return
 
         try:
             from .media_services.reddit_media import RedditMediaDownloader
+
             extracted = RedditMediaDownloader.extract_media_urls_from_submission(submission)
         except Exception:
             extracted = []
@@ -403,8 +401,8 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
 
             def _download_gallery_item(args):
                 idx, info = args
-                # Use the visible gallery order for the filename, not the internal Reddit gallery ID.
-                fid = f"{submission.id}_media_{idx:03d}"
+                gid = info.get("gallery_id", f"gallery_{idx}")
+                fid = f"{submission.id}_{gid}"
                 _trace_media(f"gallery item {fid} url={info['url']!r}")
                 return idx, download_image(info["url"], save_dir, fid, ignore_tls_errors)
 
@@ -443,10 +441,7 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
 
             f.write(f"**Original Gallery URL:** [Link](https://reddit.com{submission.permalink})\n")
         else:
-            f.write(
-                f"**Gallery post** (images unavailable): "
-                f"[View on Reddit](https://reddit.com{submission.permalink})\n"
-            )
+            f.write(f"**Gallery post** (images unavailable): [View on Reddit](https://reddit.com{submission.permalink})\n")
         return
 
     if _is_video_like_submission(submission):
@@ -455,7 +450,10 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
             if video_url:
                 _trace_media(f"video branch chose URL={video_url!r}")
                 video_path, video_size = download_image(
-                    video_url, save_dir, submission.id, ignore_tls_errors
+                    video_url,
+                    save_dir,
+                    submission.id,
+                    ignore_tls_errors,
                 )
                 if video_path:
                     f.write(f"**Video:** [{os.path.basename(video_path)}]({video_path})\n")
@@ -474,7 +472,10 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
         _trace_media(f"gif branch chose URL={gif_url!r}")
         if media_config.is_gifs_enabled():
             gif_path, gif_size = download_image(
-                gif_url, save_dir, submission.id, ignore_tls_errors
+                gif_url,
+                save_dir,
+                submission.id,
+                ignore_tls_errors,
             )
             if gif_path:
                 f.write(f"![GIF]({gif_path})\n")
@@ -491,7 +492,10 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
         _trace_media(f"image branch chose URL={image_url!r}")
         if media_config.is_images_enabled():
             image_path, image_size = download_image(
-                image_url, save_dir, submission.id, ignore_tls_errors
+                image_url,
+                save_dir,
+                submission.id,
+                ignore_tls_errors,
             )
             if image_path:
                 f.write(f"![Image]({image_path})\n")
@@ -509,6 +513,7 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
         return
 
     f.write(image_url if image_url else "[Deleted Post]")
+
 
 def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recovery_metadata=None, context_mode=False):
     """
