@@ -574,26 +574,18 @@ class RedditMediaDownloader:
 
     @classmethod
 def extract_media_urls_from_submission(cls, submission) -> List[Dict[str, Any]]:
-    """
-    Extract all media URLs from a PRAW submission.
-
-    Preserves the original behavior:
-    - i.redd.it -> direct image
-    - v.redd.it -> direct video
-    - gallery -> ordered gallery images when possible
-    - preview images -> fallback for non-gallery/external media
-    """
+    """Extract all media URLs from a PRAW submission."""
     media_urls: List[Dict[str, Any]] = []
 
     try:
-        # Reddit-hosted media
+        # Check if it's Reddit-hosted media
         if hasattr(submission, "is_reddit_media_domain") and submission.is_reddit_media_domain:
             if hasattr(submission, "domain"):
                 if submission.domain == "i.redd.it":
                     media_urls.append({
                         "url": submission.url,
                         "type": "image",
-                        "source": "reddit_direct",
+                        "source": "reddit_direct"
                     })
 
                 elif submission.domain == "v.redd.it":
@@ -605,12 +597,11 @@ def extract_media_urls_from_submission(cls, submission) -> List[Dict[str, Any]]:
                         "fallback_used": bool(video_url and video_url != submission.url),
                     })
 
-        # Gallery posts
+        # Gallery posts: preserve visible order if gallery_data exists
         if hasattr(submission, "is_gallery") and submission.is_gallery:
             media_metadata = getattr(submission, "media_metadata", None) or {}
-            gallery_ids = []
+            ordered_ids = []
 
-            # Prefer ordered gallery data if PRAW exposes it
             gallery_data = getattr(submission, "gallery_data", None)
             if isinstance(gallery_data, dict):
                 for item in gallery_data.get("items", []):
@@ -618,34 +609,25 @@ def extract_media_urls_from_submission(cls, submission) -> List[Dict[str, Any]]:
                         continue
                     media_id = item.get("media_id") or item.get("id") or item.get("mediaId")
                     if media_id:
-                        gallery_ids.append(media_id)
+                        ordered_ids.append(media_id)
 
-            # Fallback to metadata order if no explicit gallery ordering is available
-            if not gallery_ids and media_metadata:
-                gallery_ids = list(media_metadata.keys())
+            # Fallback to dict order only if gallery_data is unavailable
+            if not ordered_ids and media_metadata:
+                ordered_ids = list(media_metadata.keys())
 
-            seen_urls = set()
-            for item_id in gallery_ids:
+            for item_id in ordered_ids:
                 metadata = media_metadata.get(item_id)
                 if not isinstance(metadata, dict):
                     continue
-
                 source = metadata.get("s")
                 if not isinstance(source, dict):
                     continue
-
                 gallery_url = source.get("u")
                 if not gallery_url:
                     continue
 
-                gallery_url = gallery_url.replace("&amp;", "&")
-
-                if gallery_url in seen_urls:
-                    continue
-                seen_urls.add(gallery_url)
-
                 media_urls.append({
-                    "url": gallery_url,
+                    "url": gallery_url.replace("&amp;", "&"),
                     "type": "image",
                     "source": "reddit_gallery",
                     "gallery_id": item_id,
@@ -661,7 +643,7 @@ def extract_media_urls_from_submission(cls, submission) -> List[Dict[str, Any]]:
                         "type": "image",
                         "source": "reddit_preview",
                         "width": image["source"].get("width"),
-                        "height": image["source"].get("height"),
+                        "height": image["source"].get("height")
                     })
 
     except Exception as e:
