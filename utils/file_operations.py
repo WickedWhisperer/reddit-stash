@@ -18,7 +18,38 @@ logger = logging.getLogger(__name__)
 
 # Lock protecting concurrent access to created_dirs_cache (check-then-create pattern)
 _dir_cache_lock = threading.Lock()
+_MEDIA_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff",
+    ".mp4", ".webm", ".mov", ".mkv", ".m4v", ".avi",
+    ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".wav",
+}
 
+def _submission_media_assets_present(file_path: str, item_id: str) -> bool:
+    """
+    Return True if a submission already has at least one media asset
+    alongside its markdown file.
+    """
+    directory = os.path.dirname(file_path)
+    if not os.path.isdir(directory):
+        return False
+
+    try:
+        for name in os.listdir(directory):
+            if name == os.path.basename(file_path):
+                continue
+            if not name.startswith(item_id):
+                continue
+
+            ext = os.path.splitext(name)[1].lower()
+            if ext in _MEDIA_EXTENSIONS:
+                return True
+
+            if "_media_" in name.lower():
+                return True
+    except OSError:
+        return False
+
+    return False
 # Dynamically determine the path to the root directory
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -105,9 +136,18 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
     # Create the unique key including the content type and category
     unique_key = f"{file_id}-{subreddit_name}-{type(content).__name__}-{category}"
 
-    # If the file is already logged or exists in the directory, skip saving
+        # If the file is already logged or exists in the directory, skip saving
+    # only when the submission's media is already present too.
     if unique_key in existing_files:
-        return True, 0  # Indicate that the file already exists and no saving was performed, no media size
+        if getattr(save_function, "__name__", "") != "save_submission":
+            return True, 0
+
+        if _submission_media_assets_present(file_path, file_id):
+            return True, 0
+
+        logger.info(
+            f"Re-saving {file_id} because the markdown exists but media assets are missing."
+        )
 
     # Ensure the subreddit directory exists only if we're about to save something new
     # Use secure path creation to prevent directory traversal
