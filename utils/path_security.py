@@ -402,3 +402,24 @@ def create_reddit_file_path(base_directory: str, subreddit_name: str,
     return get_path_handler().create_reddit_file_path(
         base_directory, subreddit_name, content_type, content_id
     )
+
+
+def create_ordered_reddit_item_path(base_directory: str, subreddit_name: str,
+                                  content_type: str, content_id: str,
+                                  order_index: Optional[int] = None) -> PathValidationResult:
+    """
+    Convenience function to create an ordered safe Reddit item path.
+
+    Args:
+        base_directory: Base directory
+        subreddit_name: Subreddit name
+        content_type: Content type
+        content_id: Content ID
+        order_index: Optional zero-padded ordering prefix
+
+    Returns:
+        PathValidationResult
+    """
+    return get_path_handler().create_ordered_reddit_item_path(
+        base_directory, subreddit_name, content_type, content_id, order_index
+    )
