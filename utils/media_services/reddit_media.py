@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import glob
+import html
 import logging
 import os
-import re
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -25,7 +24,6 @@ from ..service_abstractions import (
 
 try:
     import yt_dlp  # type: ignore
-
     YTDLP_AVAILABLE = True
 except Exception:  # pragma: no cover - optional dependency
     yt_dlp = None
@@ -37,10 +35,8 @@ _logger = logging.getLogger(__name__)
 class RedditMediaDownloader:
     """
     Reddit media downloader supporting i.redd.it, v.redd.it, and galleries.
-
-    The important fix is that Reddit-hosted video-like posts should use the
-    richer dash/hls source when available, because fallback_url is the silent
-    stream.
+    The important fix is that Reddit-hosted video-like posts should use the richer
+    dash/hls source when available, because fallback_url is the silent stream.
     """
 
     def __init__(self, config: Optional[ServiceConfig] = None):
@@ -101,6 +97,7 @@ class RedditMediaDownloader:
         """Get metadata for Reddit media without downloading."""
         if not self.can_handle(url):
             return None
+
         try:
             response = requests.head(
                 url,
@@ -138,18 +135,14 @@ class RedditMediaDownloader:
 
             if "v.redd.it" in domain:
                 return self._download_reddit_video(url, save_path)
-
             if "i.redd.it" in domain:
                 return self._download_reddit_image(url, save_path)
-
             if "preview.redd.it" in domain or "external-preview.redd.it" in domain:
                 return self._download_reddit_preview(url, save_path)
-
             if "redgifs.com" in domain or "gfycat.com" in domain:
                 return self._download_reddit_video(url, save_path)
 
             return self._download_generic(url, save_path)
-
         except Exception as e:
             return DownloadResult(
                 status=DownloadStatus.FAILED,
@@ -160,13 +153,57 @@ class RedditMediaDownloader:
         """Determine media type from Reddit URL patterns."""
         parsed = urlparse(url)
         domain = parsed.netloc.lower()
+
         if "v.redd.it" in domain:
             return MediaType.VIDEO
         if "redgifs.com" in domain or "gfycat.com" in domain:
             return MediaType.VIDEO
         if "i.redd.it" in domain:
             return MediaType.IMAGE
+        if "preview.redd.it" in domain or "external-preview.redd.it" in domain:
+            return MediaType.IMAGE
+
         return self._detect_media_type(headers)
+
+    def _detect_media_type(self, headers: Dict[str, str]) -> MediaType:
+        """Best-effort detection from HTTP headers."""
+        content_type = (headers.get("content-type") or "").lower()
+
+        if "image/" in content_type:
+            return MediaType.IMAGE
+        if "video/" in content_type:
+            return MediaType.VIDEO
+        if "audio/" in content_type:
+            return MediaType.AUDIO
+
+        return MediaType.UNKNOWN
+
+    def _get_file_extension_from_headers(self, headers: Dict[str, str]) -> str:
+        """Best-effort extension guess from response headers."""
+        content_type = (headers.get("content-type") or "").lower()
+
+        if "jpeg" in content_type or "jpg" in content_type:
+            return ".jpg"
+        if "png" in content_type:
+            return ".png"
+        if "webp" in content_type:
+            return ".webp"
+        if "gif" in content_type:
+            return ".gif"
+        if "bmp" in content_type:
+            return ".bmp"
+        if "tiff" in content_type:
+            return ".tiff"
+        if "mp4" in content_type:
+            return ".mp4"
+        if "webm" in content_type:
+            return ".webm"
+        if "quicktime" in content_type or "mov" in content_type:
+            return ".mov"
+        if "audio" in content_type or "mpeg" in content_type or "mp3" in content_type:
+            return ".mp3"
+
+        return ""
 
     def _download_generic(self, url: str, save_path: str) -> DownloadResult:
         return self._download_with_requests(
@@ -186,7 +223,7 @@ class RedditMediaDownloader:
     def _download_reddit_preview(self, url: str, save_path: str) -> DownloadResult:
         """Download Reddit preview image with URL decoding and optimized headers."""
         try:
-            cleaned_url = url.replace("amp;", "")
+            cleaned_url = html.unescape(url or "").strip()
             return self._download_with_reddit_headers(
                 cleaned_url,
                 save_path,
@@ -201,7 +238,6 @@ class RedditMediaDownloader:
     def _download_reddit_video(self, url: str, save_path: str) -> DownloadResult:
         """
         Download Reddit hosted video.
-
         Prefer yt-dlp because it can follow dash/hls sources and merge audio when
         the source actually has it.
         """
@@ -236,7 +272,6 @@ class RedditMediaDownloader:
         output_dir = os.path.dirname(save_path) or "."
         base_name = os.path.splitext(os.path.basename(save_path))[0]
         outtmpl = os.path.join(output_dir, f"{base_name}.%(ext)s")
-
         options = {
             "outtmpl": outtmpl,
             "format": "bv*+ba/b",
@@ -251,11 +286,10 @@ class RedditMediaDownloader:
 
         try:
             os.makedirs(output_dir, exist_ok=True)
-
             with yt_dlp.YoutubeDL(options) as ydl:  # type: ignore[attr-defined]
                 ydl.extract_info(url, download=True)
 
-            candidates = []
+            candidates: List[str] = []
             for pattern in (
                 os.path.join(output_dir, f"{base_name}.*"),
                 os.path.join(output_dir, f"{base_name}*.mp4"),
@@ -265,9 +299,10 @@ class RedditMediaDownloader:
                 candidates.extend(glob.glob(pattern))
 
             candidates = [
-                path
-                for path in candidates
-                if os.path.isfile(path) and not path.endswith(".part") and not path.endswith(".ytdl")
+                path for path in candidates
+                if os.path.isfile(path)
+                and not path.endswith(".part")
+                and not path.endswith(".ytdl")
             ]
 
             if not candidates:
@@ -285,6 +320,7 @@ class RedditMediaDownloader:
 
             candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
             final_path = candidates[0]
+
             if final_path != save_path and os.path.exists(final_path):
                 try:
                     if os.path.exists(save_path):
@@ -306,7 +342,6 @@ class RedditMediaDownloader:
                 local_path=final_path,
                 bytes_downloaded=file_size,
             )
-
         except subprocess.TimeoutExpired:
             return DownloadResult(
                 status=DownloadStatus.FAILED,
@@ -384,6 +419,7 @@ class RedditMediaDownloader:
             "Accept-Encoding": "gzip, deflate, br",
             "Cache-Control": "no-cache",
         }
+
         try:
             response = requests.get(
                 url,
@@ -470,14 +506,10 @@ class RedditMediaDownloader:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             cmd = [
                 "ffmpeg",
-                "-i",
-                video_path,
-                "-i",
-                audio_path,
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
+                "-i", video_path,
+                "-i", audio_path,
+                "-c:v", "copy",
+                "-c:a", "aac",
                 "-shortest",
                 "-y",
                 output_path,
@@ -516,8 +548,7 @@ class RedditMediaDownloader:
         if not url:
             return None
 
-        cleaned = url.replace("&amp;", "&").strip()
-
+        cleaned = html.unescape(url).strip()
         parsed = urlparse(cleaned)
         domain = parsed.netloc.lower()
 
@@ -539,7 +570,6 @@ class RedditMediaDownloader:
     def _get_best_reddit_video_url(submission) -> Optional[str]:
         """
         Return the most useful Reddit video URL for a submission.
-
         Prefer dash_url / hls_url first because those are the richer sources.
         fallback_url is the video-only stream and is the last resort.
         """
@@ -556,7 +586,7 @@ class RedditMediaDownloader:
                 for key in ("dash_url", "hls_url", "fallback_url"):
                     candidate = reddit_video.get(key)
                     if candidate:
-                        return candidate.replace("&amp;", "&")
+                        return html.unescape(candidate)
 
             preview = getattr(submission, "preview", None)
             if isinstance(preview, dict):
@@ -565,89 +595,88 @@ class RedditMediaDownloader:
                     for key in ("dash_url", "hls_url", "fallback_url"):
                         candidate = reddit_video_preview.get(key)
                         if candidate:
-                            return candidate.replace("&amp;", "&")
-
+                            return html.unescape(candidate)
         except Exception:
             pass
 
         return getattr(submission, "url", None)
 
     @classmethod
-def extract_media_urls_from_submission(cls, submission) -> List[Dict[str, Any]]:
-    """Extract all media URLs from a PRAW submission."""
-    media_urls: List[Dict[str, Any]] = []
+    def extract_media_urls_from_submission(cls, submission) -> List[Dict[str, Any]]:
+        """Extract all media URLs from a PRAW submission."""
+        media_urls: List[Dict[str, Any]] = []
 
-    try:
-        # Check if it's Reddit-hosted media
-        if hasattr(submission, "is_reddit_media_domain") and submission.is_reddit_media_domain:
-            if hasattr(submission, "domain"):
-                if submission.domain == "i.redd.it":
-                    media_urls.append({
-                        "url": submission.url,
-                        "type": "image",
-                        "source": "reddit_direct"
-                    })
+        try:
+            # Check if it's Reddit-hosted media
+            if hasattr(submission, "is_reddit_media_domain") and submission.is_reddit_media_domain:
+                if hasattr(submission, "domain"):
+                    if submission.domain == "i.redd.it":
+                        media_urls.append({
+                            "url": submission.url,
+                            "type": "image",
+                            "source": "reddit_direct",
+                        })
+                    elif submission.domain == "v.redd.it":
+                        video_url = cls._get_best_reddit_video_url(submission)
+                        media_urls.append({
+                            "url": video_url or submission.url,
+                            "type": "video",
+                            "source": "reddit_direct",
+                            "fallback_used": bool(video_url and video_url != submission.url),
+                        })
 
-                elif submission.domain == "v.redd.it":
-                    video_url = cls._get_best_reddit_video_url(submission)
-                    media_urls.append({
-                        "url": video_url or submission.url,
-                        "type": "video",
-                        "source": "reddit_direct",
-                        "fallback_used": bool(video_url and video_url != submission.url),
-                    })
+            # Gallery posts: preserve visible order if gallery_data exists
+            if hasattr(submission, "is_gallery") and submission.is_gallery:
+                media_metadata = getattr(submission, "media_metadata", None) or {}
+                ordered_ids = []
 
-        # Gallery posts: preserve visible order if gallery_data exists
-        if hasattr(submission, "is_gallery") and submission.is_gallery:
-            media_metadata = getattr(submission, "media_metadata", None) or {}
-            ordered_ids = []
+                gallery_data = getattr(submission, "gallery_data", None)
+                if isinstance(gallery_data, dict):
+                    for item in gallery_data.get("items", []):
+                        if not isinstance(item, dict):
+                            continue
+                        media_id = item.get("media_id") or item.get("id") or item.get("mediaId")
+                        if media_id:
+                            ordered_ids.append(media_id)
 
-            gallery_data = getattr(submission, "gallery_data", None)
-            if isinstance(gallery_data, dict):
-                for item in gallery_data.get("items", []):
-                    if not isinstance(item, dict):
+                # Fallback to dict order only if gallery_data is unavailable
+                if not ordered_ids and media_metadata:
+                    ordered_ids = list(media_metadata.keys())
+
+                for item_id in ordered_ids:
+                    metadata = media_metadata.get(item_id)
+                    if not isinstance(metadata, dict):
                         continue
-                    media_id = item.get("media_id") or item.get("id") or item.get("mediaId")
-                    if media_id:
-                        ordered_ids.append(media_id)
 
-            # Fallback to dict order only if gallery_data is unavailable
-            if not ordered_ids and media_metadata:
-                ordered_ids = list(media_metadata.keys())
+                    source = metadata.get("s")
+                    if not isinstance(source, dict):
+                        continue
 
-            for item_id in ordered_ids:
-                metadata = media_metadata.get(item_id)
-                if not isinstance(metadata, dict):
-                    continue
-                source = metadata.get("s")
-                if not isinstance(source, dict):
-                    continue
-                gallery_url = source.get("u")
-                if not gallery_url:
-                    continue
+                    gallery_url = source.get("u")
+                    if not gallery_url:
+                        continue
 
-                media_urls.append({
-                    "url": gallery_url.replace("&amp;", "&"),
-                    "type": "image",
-                    "source": "reddit_gallery",
-                    "gallery_id": item_id,
-                })
-
-        # Preview images fallback
-        if hasattr(submission, "preview") and submission.preview and "images" in submission.preview:
-            for image in submission.preview["images"]:
-                if "source" in image:
-                    preview_url = image["source"]["url"].replace("&amp;", "&")
                     media_urls.append({
-                        "url": preview_url,
+                        "url": html.unescape(gallery_url),
                         "type": "image",
-                        "source": "reddit_preview",
-                        "width": image["source"].get("width"),
-                        "height": image["source"].get("height")
+                        "source": "reddit_gallery",
+                        "gallery_id": item_id,
                     })
 
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning(f"Error extracting media URLs from submission: {e}")
+            # Preview images fallback
+            if hasattr(submission, "preview") and submission.preview and "images" in submission.preview:
+                for image in submission.preview["images"]:
+                    if "source" in image:
+                        preview_url = image["source"]["url"]
+                        media_urls.append({
+                            "url": html.unescape(preview_url),
+                            "type": "image",
+                            "source": "reddit_preview",
+                            "width": image["source"].get("width"),
+                            "height": image["source"].get("height"),
+                        })
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Error extracting media URLs from submission: {e}")
 
-    return media_urls
+        return media_urls
