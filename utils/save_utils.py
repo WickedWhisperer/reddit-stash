@@ -332,7 +332,7 @@ def download_image(image_url, save_directory, submission_id, ignore_tls_errors=N
     Download a media file and save it locally.
 
     Do not fall back to raw requests for video-like URLs, because that can
-    bypass the source-selection logic needed for audio-bearing RedGifs.
+    bypass the source-selection logic needed for audio-bearing Redgifs.
     """
     try:
         from .media_download_manager import download_media_file
@@ -386,7 +386,7 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
             )
             return
 
-                try:
+        try:
             from .media_services.reddit_media import RedditMediaDownloader
             extracted = RedditMediaDownloader.extract_media_urls_from_submission(submission)
         except Exception:
@@ -541,7 +541,7 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
 
             f.write(f"id: {submission.id}\n")
             if is_recovered:
-                recovered_data = submission.recovered_data if hasattr(submission, "recovered_data") else {}
+                recovered_data = submission.recovered_data if hasattr(submission, 'recovered_data') else {}
                 f.write(f"subreddit: {recovered_data.get('subreddit', '[unknown]')}\n")
                 f.write(f"timestamp: {recovered_data.get('created_utc', 'unknown')}\n")
                 f.write(f"author: {recovered_data.get('author', '[deleted]')}\n")
