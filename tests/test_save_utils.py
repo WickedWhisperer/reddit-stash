@@ -156,6 +156,33 @@ class TestSaveSubmission(unittest.TestCase):
         self.assertIn('Check out this cool image!', content)
         self.assertIn('i.redd.it/abc123.jpg', content)
 
+    @patch('utils.save_utils.lazy_load_comments', return_value=[])
+    @patch('utils.save_utils.get_media_config')
+    @patch('utils.save_utils.download_image')
+    def test_link_post_image_uses_relative_media_path(self, mock_dl, mock_config, mock_comments):
+        """Downloaded media should be referenced relative to the Markdown file."""
+        from utils.save_utils import save_submission
+
+        media_cfg = Mock()
+        media_cfg.is_albums_enabled.return_value = False
+        media_cfg.is_videos_enabled.return_value = False
+        media_cfg.is_images_enabled.return_value = True
+        mock_config.return_value = media_cfg
+
+        media_dir = os.path.join(self.tmpdir, 'abc123_media')
+        mock_dl.return_value = (os.path.join(media_dir, 'abc123.jpg'), 1234)
+
+        sub = _make_submission(
+            is_self=False,
+            selftext='',
+            url='https://i.redd.it/abc123.jpg'
+        )
+        with open(self.filepath, 'w') as f:
+            save_submission(sub, f)
+
+        content = open(self.filepath).read()
+        self.assertIn('abc123_media/abc123.jpg', content)
+
 
 class TestProcessComments(unittest.TestCase):
     """Tests for process_comments()."""
