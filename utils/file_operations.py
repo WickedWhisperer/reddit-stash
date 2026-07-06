@@ -34,7 +34,7 @@ def _submission_media_assets_present(file_path: str, item_id: str) -> bool:
     if not os.path.isdir(directory):
         return False
 
-    media_dir_name = f"{item_id}_media"
+    media_dir_names = {"media", f"{item_id}_media"}
     markdown_name = os.path.basename(file_path)
 
     try:
@@ -50,7 +50,7 @@ def _submission_media_assets_present(file_path: str, item_id: str) -> bool:
                     continue
 
                 # New layout: dedicated per-item media folder.
-                if root_name == media_dir_name:
+                if root_name in media_dir_names:
                     return True
 
                 # Legacy layout: flat media files alongside the Markdown file.
@@ -64,6 +64,15 @@ def _submission_media_assets_present(file_path: str, item_id: str) -> bool:
         return False
 
     return False
+
+
+def _nest_content_file_path(file_path: str) -> str:
+    """Place each saved item in its own folder while keeping the file name stable."""
+    directory = os.path.dirname(file_path)
+    filename = os.path.basename(file_path)
+    item_folder = os.path.splitext(filename)[0]
+    return os.path.join(directory, item_folder, filename)
+
 
 # Dynamically determine the path to the root directory
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -106,24 +115,32 @@ def get_existing_files_from_log(file_log):
 def get_existing_files_from_dir(save_directory):
     """Build a set of all existing files in the save directory using os.walk."""
     existing_files = set()
-    for root, dirs, files in os.walk(save_directory):
+    for root, _, files in os.walk(save_directory):
         for file in files:
-            # Extract the unique key format (id-subreddit-content_type) from the file path
+            if not file.lower().endswith(".md"):
+                continue
+
+            full_path = os.path.join(root, file)
+            relative_path = os.path.relpath(full_path, save_directory)
+            parts = relative_path.split(os.sep)
+            if len(parts) < 2:
+                continue
+
+            subreddit_name = parts[0]
             filename = os.path.splitext(file)[0]
-            subreddit_name = os.path.basename(root)
             content_type = None
 
             if filename.startswith("POST_"):
-                file_id = filename.split("POST_")[1]
+                file_id = filename.split("POST_", 1)[1]
                 content_type = "Submission"
             elif filename.startswith("COMMENT_"):
-                file_id = filename.split("COMMENT_")[1]
+                file_id = filename.split("COMMENT_", 1)[1]
                 content_type = "Comment"
             elif filename.startswith("SAVED_POST_"):
-                file_id = filename.split("SAVED_POST_")[1]
+                file_id = filename.split("SAVED_POST_", 1)[1]
                 content_type = "Submission"
             elif filename.startswith("SAVED_COMMENT_"):
-                file_id = filename.split("SAVED_COMMENT_")[1]
+                file_id = filename.split("SAVED_COMMENT_", 1)[1]
                 content_type = "Comment"
             else:
                 continue
@@ -164,23 +181,25 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
             f"Re-saving {file_id} because the markdown exists but media assets are missing."
         )
 
-    # Ensure the subreddit directory exists only if we're about to save something new
-    # Use secure path creation to prevent directory traversal
-    path_result = create_safe_path(save_directory, subreddit_name)
+    # Ensure the item directory exists only if we're about to save something new.
+    # Each post/comment gets its own folder, so cloud sync providers keep
+    # related Markdown and media together.
+    item_folder = os.path.splitext(os.path.basename(file_path))[0]
+    path_result = create_safe_path(save_directory, subreddit_name, item_folder)
 
     if not path_result.is_safe:
         logger.error(f"Unsafe subreddit name '{subreddit_name}': {path_result.issues}")
         # Use a sanitized version or fallback
         fallback_name = "sanitized_subreddit"
-        path_result = create_safe_path(save_directory, fallback_name)
+        path_result = create_safe_path(save_directory, fallback_name, item_folder)
         if not path_result.is_safe:
             raise ValueError(f"Cannot create safe directory path: {path_result.issues}")
 
-    sub_dir = path_result.safe_path
+    item_dir = path_result.safe_path
     with _dir_cache_lock:
-        if sub_dir not in created_dirs_cache:
-            os.makedirs(sub_dir, exist_ok=True)
-            created_dirs_cache.add(sub_dir)
+        if item_dir not in created_dirs_cache:
+            os.makedirs(item_dir, exist_ok=True)
+            created_dirs_cache.add(item_dir)
 
     # Proceed with saving the file
     try:
@@ -304,7 +323,7 @@ def _process_submissions_batch(submissions, save_directory, existing_files, crea
             logger.error(f"Unsafe path for submission {submission.id}: {path_result.issues}")
             continue
 
-        file_path = path_result.safe_path
+        file_path = _nest_content_file_path(path_result.safe_path)
         save_result, media_size = save_to_file(
             submission, file_path, save_submission, existing_files, file_log,
             save_directory, created_dirs_cache, category=category,
@@ -346,7 +365,7 @@ def _process_comments_batch(comments, save_directory, existing_files, created_di
             logger.error(f"Unsafe path for comment {comment.id}: {path_result.issues}")
             continue
 
-        file_path = path_result.safe_path
+        file_path = _nest_content_file_path(path_result.safe_path)
         save_result, media_size = save_to_file(
             comment, file_path, save_comment_and_context, existing_files, file_log,
             save_directory, created_dirs_cache, category=category,
