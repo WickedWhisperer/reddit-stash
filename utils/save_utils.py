@@ -386,39 +386,44 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
             )
             return
 
-        try:
+                try:
             from .media_services.reddit_media import RedditMediaDownloader
-
             extracted = RedditMediaDownloader.extract_media_urls_from_submission(submission)
         except Exception:
             extracted = []
 
         gallery_images = [m for m in extracted if m.get("source") == "reddit_gallery"]
+        preview_images = [m for m in extracted if m.get("source") == "reddit_preview"]
 
-        if gallery_images:
-            f.write(f"**Gallery ({len(gallery_images)} images)**\n\n")
+        # Keep gallery order when available, but fall back to preview images
+        # so gallery-backed posts still download media even if gallery extraction fails.
+        media_items = gallery_images or preview_images
+
+        if media_items:
+            label = "Gallery" if gallery_images else "Preview"
+            f.write(f"**{label} ({len(media_items)} images)**\n\n")
             max_workers = max(1, media_config.max_concurrent_downloads())
 
             def _download_gallery_item(args):
                 idx, info = args
                 gid = info.get("gallery_id", f"gallery_{idx}")
-                fid = f"{submission.id}_{gid}"
-                _trace_media(f"gallery item {fid} url={info['url']!r}")
+                fid = f"{submission.id}_{gid}" if gallery_images else f"{submission.id}_preview_{idx:03d}"
+                _trace_media(f"{label.lower()} item {fid} url={info['url']!r}")
                 return idx, download_image(info["url"], save_dir, fid, ignore_tls_errors)
 
             results = {}
             if context_mode:
-                for i, m in enumerate(gallery_images, 1):
+                for i, m in enumerate(media_items, 1):
                     idx, (path, size) = _download_gallery_item((i, m))
                     results[idx] = (path, size)
                     if not path:
-                        logger.info(f"Context mode: gallery image {idx} failed, skipping rest")
+                        logger.info(f"Context mode: {label.lower()} image {idx} failed, skipping rest")
                         break
             else:
                 with ThreadPoolExecutor(max_workers=max_workers) as pool:
                     futures = {
                         pool.submit(_download_gallery_item, (i, m)): i
-                        for i, m in enumerate(gallery_images, 1)
+                        for i, m in enumerate(media_items, 1)
                     }
                     for future in as_completed(futures):
                         idx, (path, size) = future.result()
@@ -426,22 +431,25 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
 
             for idx in sorted(results):
                 path, size = results[idx]
-                gallery_url = gallery_images[idx - 1]["url"]
+                media_url = media_items[idx - 1]["url"]
                 if path:
-                    f.write(f"![Gallery Image {idx}]({path})\n")
+                    f.write(f"![{label} Image {idx}]({path})\n")
                     _track_media_size(size)
                 else:
-                    f.write(f"![Gallery Image {idx}]({gallery_url})\n")
-                f.write(f"*Image {idx} of {len(gallery_images)}*\n\n")
+                    f.write(f"![{label} Image {idx}]({media_url})\n")
+                f.write(f"*Image {idx} of {len(media_items)}*\n\n")
 
-            for idx in range(len(results) + 1, len(gallery_images) + 1):
-                gallery_url = gallery_images[idx - 1]["url"]
-                f.write(f"![Gallery Image {idx}]({gallery_url})\n")
-                f.write(f"*Image {idx} of {len(gallery_images)}*\n\n")
+            for idx in range(len(results) + 1, len(media_items) + 1):
+                media_url = media_items[idx - 1]["url"]
+                f.write(f"![{label} Image {idx}]({media_url})\n")
+                f.write(f"*Image {idx} of {len(media_items)}*\n\n")
 
             f.write(f"**Original Gallery URL:** [Link](https://reddit.com{submission.permalink})\n")
         else:
-            f.write(f"**Gallery post** (images unavailable): [View on Reddit](https://reddit.com{submission.permalink})\n")
+            f.write(
+                f"**Gallery post** (images unavailable): "
+                f"[View on Reddit](https://reddit.com{submission.permalink})\n"
+            )
         return
 
     if _is_video_like_submission(submission):
