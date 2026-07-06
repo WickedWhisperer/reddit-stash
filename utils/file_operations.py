@@ -28,25 +28,38 @@ _MEDIA_EXTENSIONS = {
 def _submission_media_assets_present(file_path: str, item_id: str) -> bool:
     """
     Return True if a submission already has at least one media asset
-    alongside its markdown file.
+    in its dedicated media folder or the legacy flat layout.
     """
     directory = os.path.dirname(file_path)
     if not os.path.isdir(directory):
         return False
 
+    media_dir_name = f"{item_id}_media"
+    markdown_name = os.path.basename(file_path)
+
     try:
-        for name in os.listdir(directory):
-            if name == os.path.basename(file_path):
-                continue
-            if not name.startswith(item_id):
-                continue
+        for root, _, files in os.walk(directory):
+            root_name = os.path.basename(root)
 
-            ext = os.path.splitext(name)[1].lower()
-            if ext in _MEDIA_EXTENSIONS:
-                return True
+            for name in files:
+                if name == markdown_name:
+                    continue
 
-            if "_media_" in name.lower():
-                return True
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in _MEDIA_EXTENSIONS:
+                    continue
+
+                # New layout: dedicated per-item media folder.
+                if root_name == media_dir_name:
+                    return True
+
+                # Legacy layout: flat media files alongside the Markdown file.
+                if root == directory and name.startswith(item_id):
+                    return True
+
+                # Backward compatibility for older naming schemes.
+                if root == directory and "_media_" in name.lower():
+                    return True
     except OSError:
         return False
 
@@ -531,4 +544,3 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
     save_file_log(file_log, save_directory)
 
     return processed_count, skipped_count, total_size, total_media_size
-    
