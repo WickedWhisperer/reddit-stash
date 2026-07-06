@@ -401,4 +401,4 @@ def create_reddit_file_path(base_directory: str, subreddit_name: str,
     """
     return get_path_handler().create_reddit_file_path(
         base_directory, subreddit_name, content_type, content_id
-    )
+        )
