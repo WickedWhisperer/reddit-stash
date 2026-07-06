@@ -276,9 +276,10 @@ def _get_item_media_directory(markdown_file):
 def _relative_media_link(markdown_file, media_path):
     """Return a relative path from the markdown file to the media file."""
     try:
-        return os.path.relpath(media_path, start=os.path.dirname(markdown_file.name))
+        relative = os.path.relpath(media_path, start=os.path.dirname(markdown_file.name))
+        return relative.replace("\\", "/")
     except Exception:
-        return media_path
+        return str(media_path).replace("\\", "/")
 
 
 def _download_image_fallback(image_url, save_directory, submission_id, ignore_tls_errors=None):
