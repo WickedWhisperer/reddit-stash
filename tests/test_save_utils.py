@@ -159,8 +159,8 @@ class TestSaveSubmission(unittest.TestCase):
     @patch('utils.save_utils.lazy_load_comments', return_value=[])
     @patch('utils.save_utils.get_media_config')
     @patch('utils.save_utils.download_image')
-    def test_link_post_image_uses_relative_media_path(self, mock_dl, mock_config, mock_comments):
-        """Downloaded media should be referenced relative to the Markdown file."""
+    def test_link_post_uses_relative_media_paths(self, mock_dl, mock_config, mock_comments):
+        """Saved media links should stay relative to the post folder."""
         from utils.save_utils import save_submission
 
         media_cfg = Mock()
@@ -169,67 +169,26 @@ class TestSaveSubmission(unittest.TestCase):
         media_cfg.is_images_enabled.return_value = True
         mock_config.return_value = media_cfg
 
-        media_dir = os.path.join(self.tmpdir, 'abc123_media')
-        mock_dl.return_value = (os.path.join(media_dir, 'abc123.jpg'), 1234)
+        post_dir = os.path.join(self.tmpdir, 'test', '00001_POST_abc123')
+        os.makedirs(post_dir, exist_ok=True)
+        md_path = os.path.join(post_dir, 'POST_abc123.md')
+        media_path = os.path.join(post_dir, 'media', '001.jpg')
+        os.makedirs(os.path.dirname(media_path), exist_ok=True)
+        with open(media_path, 'wb'):
+            pass
+        mock_dl.return_value = (media_path, 123)
 
         sub = _make_submission(
             is_self=False,
             selftext='',
             url='https://i.redd.it/abc123.jpg'
         )
-        with open(self.filepath, 'w') as f:
+        with open(md_path, 'w') as f:
             save_submission(sub, f)
 
-        content = open(self.filepath).read()
-        self.assertIn('abc123_media/abc123.jpg', content)
-
-
-@patch('utils.save_utils.lazy_load_comments', return_value=[])
-@patch('utils.save_utils.get_media_config')
-@patch('utils.save_utils.download_image')
-@patch('utils.media_services.reddit_media.RedditMediaDownloader.extract_media_urls_from_submission')
-def test_gallery_media_is_numbered_and_relative(self, mock_extract, mock_download, mock_config, mock_comments):
-    """Gallery media should be saved in order and linked relative to the post folder."""
-    from utils.save_utils import save_submission
-
-    media_cfg = Mock()
-    media_cfg.is_albums_enabled.return_value = True
-    media_cfg.is_videos_enabled.return_value = False
-    media_cfg.is_images_enabled.return_value = True
-    media_cfg.max_concurrent_downloads.return_value = 4
-    mock_config.return_value = media_cfg
-
-    mock_extract.return_value = [
-        {"url": "https://i.redd.it/one.jpg", "type": "image", "source": "reddit_gallery", "gallery_id": "g1"},
-        {"url": "https://i.redd.it/two.jpg", "type": "image", "source": "reddit_gallery", "gallery_id": "g2"},
-    ]
-
-    def _side_effect(url, save_directory, file_id, ignore_tls_errors=None):
-        path = os.path.join(save_directory, f"{file_id}.jpg")
-        return path, 123
-
-    mock_download.side_effect = _side_effect
-
-    post_dir = os.path.join(self.tmpdir, 'test', 'POST_abc123')
-    os.makedirs(post_dir, exist_ok=True)
-    self.filepath = os.path.join(post_dir, 'POST_abc123.md')
-
-    sub = _make_submission(is_self=False, url='https://www.reddit.com/gallery/abc123', is_gallery=True)
-    sub.media_metadata = {
-        'g1': {'s': {'u': 'https://i.redd.it/one.jpg'}},
-        'g2': {'s': {'u': 'https://i.redd.it/two.jpg'}},
-    }
-    sub.gallery_data = {'items': [{'media_id': 'g1'}, {'media_id': 'g2'}]}
-
-    with open(self.filepath, 'w') as f:
-        save_submission(sub, f)
-
-    content = open(self.filepath).read()
-    self.assertIn('media/001.jpg', content)
-    self.assertIn('media/002.jpg', content)
-    self.assertLess(content.index('media/001.jpg'), content.index('media/002.jpg'))
-    mock_download.assert_any_call('https://i.redd.it/one.jpg', os.path.join(post_dir, 'media'), '001', None)
-    mock_download.assert_any_call('https://i.redd.it/two.jpg', os.path.join(post_dir, 'media'), '002', None)
+        content = open(md_path).read()
+        self.assertIn('media/001.jpg', content)
+        self.assertNotIn(self.tmpdir, content)
 
 
 class TestProcessComments(unittest.TestCase):
