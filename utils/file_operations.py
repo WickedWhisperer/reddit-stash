@@ -11,7 +11,15 @@ from utils.log_utils import log_file, save_file_log
 from utils.save_utils import save_submission, save_comment_and_context, _reset_media_tracker, _get_media_size
 from utils.time_utilities import dynamic_sleep
 from utils.env_config import get_ignore_tls_errors
-from utils.path_security import create_safe_path, create_reddit_file_path, create_ordered_reddit_item_path
+try:
+    from utils.path_security import create_safe_path, create_reddit_file_path, create_ordered_reddit_item_path
+except ImportError:
+    from utils.path_security import create_safe_path, create_reddit_file_path
+
+    def create_ordered_reddit_item_path(base_directory: str, subreddit_name: str,
+                                        content_type: str, content_id: str,
+                                        order_index: int | None = None):
+        return create_reddit_file_path(base_directory, subreddit_name, content_type, content_id)
 from utils.praw_helpers import safe_fetch_items_one_by_one
 
 
