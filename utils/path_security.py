@@ -328,6 +328,31 @@ class SecurePathHandler:
         # Create safe path
         return self.create_safe_path(base_directory, subreddit_name, filename)
 
+    def create_ordered_reddit_item_path(self, base_directory: str, subreddit_name: str,
+                                        content_type: str, content_id: str,
+                                        order_index: Optional[int] = None) -> PathValidationResult:
+        """
+        Create a stable per-item folder and markdown file path.
+
+        The folder name can be prefixed with a zero-padded order index so cloud
+        providers list items in the same order they were processed/fetched.
+        The markdown filename itself stays compatible with older tooling.
+        """
+        valid_types = {'POST', 'COMMENT', 'SAVED_POST', 'SAVED_COMMENT',
+                      'UPVOTE_POST', 'UPVOTE_COMMENT', 'GDPR_POST', 'GDPR_COMMENT'}
+
+        if content_type not in valid_types:
+            return PathValidationResult(
+                is_safe=False,
+                issues=[f"Invalid content type: {content_type}"]
+            )
+
+        item_name = f"{content_type}_{content_id}"
+        folder_name = f"{order_index:05d}_{item_name}" if order_index is not None else item_name
+        filename = f"{item_name}.md"
+
+        return self.create_safe_path(base_directory, subreddit_name, folder_name, filename)
+
 
 # Global instance
 _global_path_handler = None
@@ -376,4 +401,4 @@ def create_reddit_file_path(base_directory: str, subreddit_name: str,
     """
     return get_path_handler().create_reddit_file_path(
         base_directory, subreddit_name, content_type, content_id
-    )
+            )
