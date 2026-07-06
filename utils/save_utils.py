@@ -270,7 +270,9 @@ def _get_media_size():
 
 def _media_asset_directory(save_dir: str, item_id: str) -> str:
     """Return a dedicated folder for one post/comment's downloaded media."""
-    return os.path.join(save_dir, f"{item_id}_media")
+    # Keep every item in a stable folder layout so cloud listings remain
+    # grouped by post/comment rather than by download completion order.
+    return os.path.join(save_dir, "media")
 
 
 def _markdown_media_link(markdown_file: str, media_path: str) -> str:
@@ -391,6 +393,8 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
         f"is_gallery={getattr(submission, 'is_gallery', None)!r}"
     )
 
+    media_dir = _media_asset_directory(save_dir, submission.id)
+
     if (
         not is_recovered
         and hasattr(submission, "is_gallery")
@@ -419,12 +423,11 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
             label = "Gallery" if gallery_images else "Preview"
             f.write(f"**{label} ({len(media_items)} images)**\n\n")
             max_workers = max(1, media_config.max_concurrent_downloads())
-            media_dir = _media_asset_directory(save_dir, submission.id)
+            media_name_width = max(3, len(str(len(media_items))))
 
             def _download_gallery_item(args):
                 idx, info = args
-                gid = info.get("gallery_id", f"gallery_{idx}")
-                fid = f"{submission.id}_{gid}" if gallery_images else f"{submission.id}_preview_{idx:03d}"
+                fid = f"{idx:0{media_name_width}d}"
                 _trace_media(f"{label.lower()} item {fid} url={info['url']!r}")
                 return idx, download_image(info["url"], media_dir, fid, ignore_tls_errors)
 
@@ -476,8 +479,8 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
                 _trace_media(f"video branch chose URL={video_url!r}")
                 video_path, video_size = download_image(
                     video_url,
-                    save_dir,
-                    submission.id,
+                    media_dir,
+                    "001",
                     ignore_tls_errors,
                 )
                 if video_path:
@@ -498,8 +501,8 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
         if media_config.is_gifs_enabled():
             gif_path, gif_size = download_image(
                 gif_url,
-                save_dir,
-                submission.id,
+                media_dir,
+                "001",
                 ignore_tls_errors,
             )
             if gif_path:
@@ -518,8 +521,8 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
         if media_config.is_images_enabled():
             image_path, image_size = download_image(
                 image_url,
-                save_dir,
-                submission.id,
+                media_dir,
+                "001",
                 ignore_tls_errors,
             )
             if image_path:
@@ -797,4 +800,3 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
 
         if depth == 0:
             f.write("---\n")
-   
