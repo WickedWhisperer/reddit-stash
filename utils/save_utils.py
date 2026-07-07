@@ -268,20 +268,6 @@ def _get_media_size():
     return getattr(_media_size_local, "size", 0)
 
 
-def _get_item_media_directory(markdown_file):
-    """Return the per-item media directory for a markdown file handle."""
-    return os.path.join(os.path.dirname(markdown_file.name), "media")
-
-
-def _relative_media_link(markdown_file, media_path):
-    """Return a relative path from the markdown file to the media file."""
-    try:
-        relative = os.path.relpath(media_path, start=os.path.dirname(markdown_file.name))
-        return relative.replace("\\", "/")
-    except Exception:
-        return str(media_path).replace("\\", "/")
-
-
 def _download_image_fallback(image_url, save_directory, submission_id, ignore_tls_errors=None):
     """
     Direct requests fallback for normal image URLs only.
@@ -417,14 +403,13 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
             label = "Gallery" if gallery_images else "Preview"
             f.write(f"**{label} ({len(media_items)} images)**\n\n")
             max_workers = max(1, media_config.max_concurrent_downloads())
-
-            media_dir = _get_item_media_directory(f)
+            media_save_dir = os.path.join(save_dir, "media")
 
             def _download_gallery_item(args):
                 idx, info = args
                 fid = f"{idx:03d}"
                 _trace_media(f"{label.lower()} item {fid} url={info['url']!r}")
-                return idx, download_image(info["url"], media_dir, fid, ignore_tls_errors)
+                return idx, download_image(info["url"], media_save_dir, fid, ignore_tls_errors)
 
             results = {}
             if context_mode:
@@ -448,7 +433,8 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
                 path, size = results[idx]
                 media_url = media_items[idx - 1]["url"]
                 if path:
-                    f.write(f"![{label} Image {idx}]({_relative_media_link(f, path)})\n")
+                    rel_path = os.path.relpath(path, start=os.path.dirname(f.name))
+                    f.write(f"![{label} Image {idx}]({rel_path})\n")
                     _track_media_size(size)
                 else:
                     f.write(f"![{label} Image {idx}]({media_url})\n")
@@ -472,15 +458,15 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
             video_url = _get_video_download_url(submission)
             if video_url:
                 _trace_media(f"video branch chose URL={video_url!r}")
-                media_dir = _get_item_media_directory(f)
                 video_path, video_size = download_image(
                     video_url,
-                    media_dir,
-                    "001",
+                    media_save_dir,
+                    submission.id,
                     ignore_tls_errors,
                 )
                 if video_path:
-                    f.write(f"**Video:** [{os.path.basename(video_path)}]({_relative_media_link(f, video_path)})\n")
+                    rel_video_path = os.path.relpath(video_path, start=os.path.dirname(f.name))
+                    f.write(f"**Video:** [{os.path.basename(video_path)}]({rel_video_path})\n")
                     f.write(f"**Original Video URL:** [Link]({submission.url})\n")
                     _track_media_size(video_size)
                 else:
@@ -495,15 +481,14 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
     if gif_url:
         _trace_media(f"gif branch chose URL={gif_url!r}")
         if media_config.is_gifs_enabled():
-            media_dir = _get_item_media_directory(f)
             gif_path, gif_size = download_image(
                 gif_url,
-                media_dir,
-                "001",
+                media_save_dir,
+                submission.id,
                 ignore_tls_errors,
             )
             if gif_path:
-                f.write(f"![GIF]({_relative_media_link(f, gif_path)})\n")
+                f.write(f"![GIF]({os.path.relpath(gif_path, start=os.path.dirname(f.name))})\n")
                 f.write(f"**Original GIF URL:** [Link]({gif_url})\n")
                 _track_media_size(gif_size)
             else:
@@ -516,15 +501,14 @@ def _save_submission_media(submission, f, is_recovered, media_config, save_dir, 
     if _is_image_url(image_url):
         _trace_media(f"image branch chose URL={image_url!r}")
         if media_config.is_images_enabled():
-            media_dir = _get_item_media_directory(f)
             image_path, image_size = download_image(
                 image_url,
-                media_dir,
-                "001",
+                media_save_dir,
+                submission.id,
                 ignore_tls_errors,
             )
             if image_path:
-                f.write(f"![Image]({_relative_media_link(f, image_path)})\n")
+                f.write(f"![Image]({os.path.relpath(image_path, start=os.path.dirname(f.name))})\n")
                 f.write(f"**Original Image URL:** [Link]({image_url})\n")
                 _track_media_size(image_size)
             else:
@@ -588,6 +572,7 @@ def save_submission(submission, f, unsave=False, ignore_tls_errors=None, recover
             f.write("\n\n---\n\n")
             media_config = get_media_config()
             save_dir = os.path.dirname(f.name)
+            media_save_dir = os.path.join(save_dir, "media")
 
             try:
                 _save_submission_media(
@@ -722,15 +707,14 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
                 f.write(f"{bq}\n")
 
                 if media_config.is_videos_enabled():
-                    media_dir = os.path.join(os.path.dirname(f.name), "media")
                     video_path, video_size = download_image(
                         video_url,
-                        media_dir,
-                        "001",
+                        os.path.join(os.path.dirname(f.name), "media"),
+                        comment.id,
                         ignore_tls_errors,
                     )
                     if video_path:
-                        f.write(f"{bq}![Video]({_relative_media_link(f, video_path)})\n")
+                        f.write(f"{bq}![Video]({os.path.relpath(video_path, start=os.path.dirname(f.name))})\n")
                         f.write(f"{bq}*Original Video URL: [Link]({video_url})*\n\n")
                         _track_media_size(video_size)
                     else:
@@ -747,15 +731,14 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
                 f.write(f"{bq}\n")
 
                 if media_config.is_gifs_enabled():
-                    media_dir = os.path.join(os.path.dirname(f.name), "media")
                     gif_path, gif_size = download_image(
                         gif_url,
-                        media_dir,
-                        "001",
+                        os.path.join(os.path.dirname(f.name), "media"),
+                        comment.id,
                         ignore_tls_errors,
                     )
                     if gif_path:
-                        f.write(f"{bq}![GIF]({_relative_media_link(f, gif_path)})\n")
+                        f.write(f"{bq}![GIF]({os.path.relpath(gif_path, start=os.path.dirname(f.name))})\n")
                         f.write(f"{bq}*Original GIF URL: [Link]({gif_url})*\n\n")
                         _track_media_size(gif_size)
                     else:
@@ -772,15 +755,14 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
                 f.write(f"{bq}\n")
 
                 if media_config.is_images_enabled():
-                    media_dir = os.path.join(os.path.dirname(f.name), "media")
                     image_path, image_size = download_image(
                         image_url,
-                        media_dir,
-                        "001",
+                        os.path.join(os.path.dirname(f.name), "media"),
+                        comment.id,
                         ignore_tls_errors,
                     )
                     if image_path:
-                        f.write(f"{bq}![Image]({_relative_media_link(f, image_path)})\n")
+                        f.write(f"{bq}![Image]({os.path.relpath(image_path, start=os.path.dirname(f.name))})\n")
                         f.write(f"{bq}*Original Image URL: [Link]({image_url})*\n\n")
                         _track_media_size(image_size)
                     else:
@@ -798,3 +780,4 @@ def process_comments(comments, f, depth=0, simple_format=False, ignore_tls_error
 
         if depth == 0:
             f.write("---\n")
+  
