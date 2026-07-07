@@ -1,5 +1,4 @@
 import os
-import re
 import configparser
 import logging
 import threading
@@ -11,15 +10,7 @@ from utils.log_utils import log_file, save_file_log
 from utils.save_utils import save_submission, save_comment_and_context, _reset_media_tracker, _get_media_size
 from utils.time_utilities import dynamic_sleep
 from utils.env_config import get_ignore_tls_errors
-try:
-    from utils.path_security import create_safe_path, create_reddit_file_path, create_ordered_reddit_item_path
-except ImportError:
-    from utils.path_security import create_safe_path, create_reddit_file_path
-
-    def create_ordered_reddit_item_path(base_directory: str, subreddit_name: str,
-                                        content_type: str, content_id: str,
-                                        order_index: int | None = None):
-        return create_reddit_file_path(base_directory, subreddit_name, content_type, content_id)
+from utils.path_security import create_safe_path, create_ordered_reddit_item_path
 from utils.praw_helpers import safe_fetch_items_one_by_one
 
 
@@ -34,39 +25,70 @@ _MEDIA_EXTENSIONS = {
     ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".wav",
 }
 
-_ITEM_FILENAME_RE = re.compile(
-    r'^(?:(?P<order>\d+)_)?(?P<content_type>POST|COMMENT|SAVED_POST|SAVED_COMMENT|UPVOTE_POST|UPVOTE_COMMENT|GDPR_POST|GDPR_COMMENT)_(?P<file_id>.+?)\.md$',
-    re.IGNORECASE,
-)
-
-
 def _submission_media_assets_present(file_path: str, item_id: str) -> bool:
     """
     Return True if a submission already has at least one media asset
-    in its per-item folder.
+    in its item folder (legacy flat layout is still supported).
     """
     directory = os.path.dirname(file_path)
-    if not os.path.isdir(directory):
-        return False
+    search_dirs = [directory, os.path.join(directory, 'media')]
 
-    search_roots = [directory]
-    media_dir = os.path.join(directory, 'media')
-    if os.path.isdir(media_dir):
-        search_roots.insert(0, media_dir)
+    for search_dir in search_dirs:
+        if not os.path.isdir(search_dir):
+            continue
 
-    try:
-        for root_dir in search_roots:
-            for current_root, _dirs, files in os.walk(root_dir):
-                for name in files:
-                    if name == os.path.basename(file_path):
-                        continue
-                    ext = os.path.splitext(name)[1].lower()
-                    if ext in _MEDIA_EXTENSIONS:
-                        return True
-    except OSError:
-        return False
+        try:
+            for name in os.listdir(search_dir):
+                if name == os.path.basename(file_path):
+                    continue
+                if not name.startswith(item_id):
+                    continue
+
+                ext = os.path.splitext(name)[1].lower()
+                if ext in _MEDIA_EXTENSIONS:
+                    return True
+
+                if "_media_" in name.lower():
+                    return True
+        except OSError:
+            continue
 
     return False
+
+
+def _get_item_created_utc(content):
+    """Best-effort extraction of an item's original creation time."""
+    if content is None:
+        return None
+
+    created_utc = getattr(content, 'created_utc', None)
+    if created_utc not in (None, ''):
+        return created_utc
+
+    recovered_data = getattr(content, 'recovered_data', None) or {}
+    if isinstance(recovered_data, dict):
+        created_utc = recovered_data.get('created_utc') or recovered_data.get('created')
+        if created_utc not in (None, ''):
+            return created_utc
+
+    return None
+
+
+def _archive_sort_key(content):
+    """Sort newest-first using metadata so archive folders remain deterministic."""
+    created = _get_item_created_utc(content)
+    try:
+        created_key = int(float(created)) if created not in (None, '') else -1
+    except (TypeError, ValueError):
+        created_key = -1
+
+    # Negative values are pushed to the end of the archive.
+    reverse_key = 9999999999999 - created_key if created_key >= 0 else 9999999999999
+    return (
+        reverse_key,
+        getattr(getattr(content, 'subreddit', None), 'display_name', '') or '',
+        getattr(content, 'id', '') or '',
+    )
 
 # Dynamically determine the path to the root directory
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -110,26 +132,41 @@ def get_existing_files_from_dir(save_directory):
     """Build a set of all existing files in the save directory using os.walk."""
     existing_files = set()
     for root, dirs, files in os.walk(save_directory):
-        rel_root = os.path.relpath(root, save_directory)
-        if rel_root == os.curdir:
-            continue
-
-        parts = rel_root.split(os.sep)
-        subreddit_name = parts[0] if parts else os.path.basename(root)
-
         for file in files:
-            match = _ITEM_FILENAME_RE.match(file)
-            if not match:
+            filename = os.path.splitext(file)[0]
+            rel_root = os.path.relpath(root, save_directory)
+            parts = [] if rel_root in ('.', os.curdir) else rel_root.split(os.sep)
+            subreddit_name = parts[0] if parts else 'unknown'
+            content_type = None
+
+            if filename.startswith("POST_"):
+                file_id = filename.split("POST_", 1)[1]
+                content_type = "Submission"
+            elif filename.startswith("COMMENT_"):
+                file_id = filename.split("COMMENT_", 1)[1]
+                content_type = "Comment"
+            elif filename.startswith("SAVED_POST_"):
+                file_id = filename.split("SAVED_POST_", 1)[1]
+                content_type = "Submission"
+            elif filename.startswith("SAVED_COMMENT_"):
+                file_id = filename.split("SAVED_COMMENT_", 1)[1]
+                content_type = "Comment"
+            elif filename.startswith("UPVOTE_POST_"):
+                file_id = filename.split("UPVOTE_POST_", 1)[1]
+                content_type = "Submission"
+            elif filename.startswith("UPVOTE_COMMENT_"):
+                file_id = filename.split("UPVOTE_COMMENT_", 1)[1]
+                content_type = "Comment"
+            elif filename.startswith("GDPR_POST_"):
+                file_id = filename.split("GDPR_POST_", 1)[1]
+                content_type = "Submission"
+            elif filename.startswith("GDPR_COMMENT_"):
+                file_id = filename.split("GDPR_COMMENT_", 1)[1]
+                content_type = "Comment"
+            else:
                 continue
 
-            content_type = match.group("content_type").upper()
-            file_id = match.group("file_id")
-            if content_type.endswith("POST"):
-                item_type = "Submission"
-            else:
-                item_type = "Comment"
-
-            unique_key = f"{file_id}-{subreddit_name}-{item_type}"
+            unique_key = f"{file_id}-{subreddit_name}-{content_type}"
             existing_files.add(unique_key)
     return existing_files
 
@@ -165,23 +202,13 @@ def save_to_file(content, file_path, save_function, existing_files, file_log, sa
             f"Re-saving {file_id} because the markdown exists but media assets are missing."
         )
 
-    # Ensure the subreddit directory exists only if we're about to save something new
-    # Use secure path creation to prevent directory traversal
-    path_result = create_safe_path(save_directory, subreddit_name)
-
-    if not path_result.is_safe:
-        logger.error(f"Unsafe subreddit name '{subreddit_name}': {path_result.issues}")
-        # Use a sanitized version or fallback
-        fallback_name = "sanitized_subreddit"
-        path_result = create_safe_path(save_directory, fallback_name)
-        if not path_result.is_safe:
-            raise ValueError(f"Cannot create safe directory path: {path_result.issues}")
-
-    sub_dir = path_result.safe_path
-    with _dir_cache_lock:
-        if sub_dir not in created_dirs_cache:
-            os.makedirs(sub_dir, exist_ok=True)
-            created_dirs_cache.add(sub_dir)
+    # Ensure the target directory exists only if we're about to save something new.
+    target_dir = os.path.dirname(file_path)
+    if target_dir:
+        with _dir_cache_lock:
+            if target_dir not in created_dirs_cache:
+                os.makedirs(target_dir, exist_ok=True)
+                created_dirs_cache.add(target_dir)
 
     # Proceed with saving the file
     try:
@@ -297,9 +324,12 @@ def _process_submissions_batch(submissions, save_directory, existing_files, crea
     total_size = 0
     total_media_size = 0
 
-    for order_index, submission in enumerate(tqdm(submissions, desc=tqdm_desc, position=tqdm_position, leave=True), start=1):
+    submissions = sorted(list(submissions), key=_archive_sort_key)
+
+    for submission in tqdm(submissions, desc=tqdm_desc, position=tqdm_position, leave=True):
         path_result = create_ordered_reddit_item_path(
-            save_directory, submission.subreddit.display_name, category, submission.id, order_index
+            save_directory, submission.subreddit.display_name, category, submission.id,
+            created_utc=getattr(submission, "created_utc", None)
         )
         if not path_result.is_safe:
             logger.error(f"Unsafe path for submission {submission.id}: {path_result.issues}")
@@ -339,9 +369,12 @@ def _process_comments_batch(comments, save_directory, existing_files, created_di
     total_size = 0
     total_media_size = 0
 
-    for order_index, comment in enumerate(tqdm(comments, desc=tqdm_desc, position=tqdm_position, leave=True), start=1):
+    comments = sorted(list(comments), key=_archive_sort_key)
+
+    for comment in tqdm(comments, desc=tqdm_desc, position=tqdm_position, leave=True):
         path_result = create_ordered_reddit_item_path(
-            save_directory, comment.subreddit.display_name, category, comment.id, order_index
+            save_directory, comment.subreddit.display_name, category, comment.id,
+            created_utc=getattr(comment, "created_utc", None)
         )
         if not path_result.is_safe:
             logger.error(f"Unsafe path for comment {comment.id}: {path_result.issues}")
@@ -385,7 +418,9 @@ def _process_mixed_items(items, save_directory, existing_files, created_dirs_cac
     total_size = 0
     total_media_size = 0
 
-    for order_index, item in enumerate(tqdm(items, desc=tqdm_desc, position=tqdm_position, leave=True), start=1):
+    items = sorted(list(items), key=_archive_sort_key)
+
+    for item in tqdm(items, desc=tqdm_desc, position=tqdm_position, leave=True):
         if isinstance(item, Submission):
             category = sub_category
             save_fn = save_submission
@@ -396,7 +431,8 @@ def _process_mixed_items(items, save_directory, existing_files, created_dirs_cac
             continue
 
         path_result = create_ordered_reddit_item_path(
-            save_directory, item.subreddit.display_name, category, item.id, order_index
+            save_directory, item.subreddit.display_name, category, item.id,
+            created_utc=getattr(item, "created_utc", None)
         )
         if not path_result.is_safe:
             logger.error(f"Unsafe path for item {item.id}: {path_result.issues}")
