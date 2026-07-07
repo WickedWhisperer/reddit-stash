@@ -84,6 +84,8 @@ jobs:
         run: |
           if [ "$STORAGE_PROVIDER" = "s3" ]; then
             echo "provider=s3" >> $GITHUB_OUTPUT
+          elif [ "$STORAGE_PROVIDER" = "mega" ]; then
+            echo "provider=mega" >> $GITHUB_OUTPUT
           else
             echo "provider=dropbox" >> $GITHUB_OUTPUT
           fi
@@ -154,4 +156,3 @@ jobs:
           S3_STORAGE_CLASS: ${{ secrets.S3_STORAGE_CLASS }}
         run: |
           python storage_utils.py --upload
-          
