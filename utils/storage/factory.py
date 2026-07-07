@@ -1,5 +1,4 @@
 """Storage provider factory and configuration loading."""
-
 from __future__ import annotations
 
 import configparser
@@ -10,52 +9,102 @@ from typing import Optional
 from utils.config_paths import get_settings_file_path
 from utils.storage.base import StorageProvider
 
-_INVALID = (None, "", "None")
+
+def _normalize_optional(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value or value.lower() in {"none", "null", "undefined"}:
+        return None
+    return value
 
 
-@dataclass
+def _get_config_value(parser: configparser.ConfigParser, section: str, key: str) -> Optional[str]:
+    if parser.has_option(section, key):
+        return _normalize_optional(parser.get(section, key))
+    return None
+
+
+@dataclass(slots=True)
 class StorageConfig:
-    """All storage-related configuration."""
-
     provider: StorageProvider = StorageProvider.NONE
-
-    # Remote directory root used by cloud backends that store under a folder
-    dropbox_directory: str = "/reddit"
-
-    # S3
+    storage_root: str = "/reddit"
     s3_bucket: Optional[str] = None
     s3_region: Optional[str] = None
     s3_storage_class: str = "STANDARD_IA"
     s3_endpoint_url: Optional[str] = None
 
+    @property
+    def dropbox_directory(self) -> str:
+        return self.storage_root
+
 
 def load_storage_config() -> StorageConfig:
-    """Load storage configuration from settings.ini or SETTINGS_FILE with env var overrides."""
+    """
+    Load storage settings from environment variables and the active settings file.
+
+    Precedence:
+      1. Environment variables
+      2. [Storage] section
+      3. [Settings] section
+      4. Defaults
+    """
     parser = configparser.ConfigParser()
-    parser.read(get_settings_file_path())
+    settings_file = get_settings_file_path()
+    parser.read(settings_file)
 
-    def _get(section: str, key: str, fallback: Optional[str] = None) -> Optional[str]:
-        val = parser.get(section, key, fallback=fallback)
-        return val if val not in _INVALID else fallback
-
-    provider_str = os.getenv("STORAGE_PROVIDER") or _get("Storage", "provider", "none")
+    provider_str = (
+        os.getenv("STORAGE_PROVIDER")
+        or _get_config_value(parser, "Storage", "provider")
+        or _get_config_value(parser, "Settings", "storage_provider")
+        or "none"
+    )
 
     try:
         provider = StorageProvider(provider_str.lower())
     except ValueError as exc:
-        valid = ", ".join(p.value for p in StorageProvider)
-        raise ValueError(f"Invalid storage provider '{provider_str}'. Must be one of: {valid}") from exc
+        valid = ", ".join(item.value for item in StorageProvider)
+        raise ValueError(
+            f"Invalid storage provider '{provider_str}'. "
+            f"Must be one of: {valid}"
+        ) from exc
 
-    dropbox_dir = _get("Settings", "dropbox_directory", "/reddit")
+    storage_root = (
+        os.getenv("STORAGE_ROOT")
+        or os.getenv("DROPBOX_DIRECTORY")
+        or _get_config_value(parser, "Storage", "storage_root")
+        or _get_config_value(parser, "Storage", "dropbox_directory")
+        or _get_config_value(parser, "Settings", "storage_root")
+        or _get_config_value(parser, "Settings", "dropbox_directory")
+        or "/reddit"
+    )
 
-    s3_bucket = os.getenv("AWS_S3_BUCKET") or _get("Storage", "s3_bucket")
-    s3_region = os.getenv("AWS_DEFAULT_REGION") or _get("Storage", "s3_region")
-    s3_storage_class = os.getenv("S3_STORAGE_CLASS") or _get("Storage", "s3_storage_class", "STANDARD_IA")
-    s3_endpoint_url = os.getenv("S3_ENDPOINT_URL") or _get("Storage", "s3_endpoint_url")
+    s3_bucket = (
+        os.getenv("AWS_S3_BUCKET")
+        or _get_config_value(parser, "Storage", "s3_bucket")
+        or _get_config_value(parser, "Settings", "s3_bucket")
+    )
+    s3_region = (
+        os.getenv("AWS_DEFAULT_REGION")
+        or os.getenv("AWS_REGION")
+        or _get_config_value(parser, "Storage", "s3_region")
+        or _get_config_value(parser, "Settings", "s3_region")
+    )
+    s3_storage_class = (
+        os.getenv("S3_STORAGE_CLASS")
+        or _get_config_value(parser, "Storage", "s3_storage_class")
+        or _get_config_value(parser, "Settings", "s3_storage_class")
+        or "STANDARD_IA"
+    )
+    s3_endpoint_url = (
+        os.getenv("S3_ENDPOINT_URL")
+        or _get_config_value(parser, "Storage", "s3_endpoint_url")
+        or _get_config_value(parser, "Settings", "s3_endpoint_url")
+    )
 
     return StorageConfig(
         provider=provider,
-        dropbox_directory=dropbox_dir,
+        storage_root=storage_root,
         s3_bucket=s3_bucket,
         s3_region=s3_region,
         s3_storage_class=s3_storage_class,
@@ -64,11 +113,7 @@ def load_storage_config() -> StorageConfig:
 
 
 def get_storage_provider(config: Optional[StorageConfig] = None):
-    """
-    Factory: return the configured storage provider instance (not yet connected).
-
-    Returns None when provider is NONE.
-    """
+    """Instantiate the configured storage provider."""
     if config is None:
         config = load_storage_config()
 
@@ -77,15 +122,18 @@ def get_storage_provider(config: Optional[StorageConfig] = None):
 
     if config.provider == StorageProvider.DROPBOX:
         from utils.storage.dropbox_provider import DropboxStorageProvider
-        return DropboxStorageProvider(dropbox_directory=config.dropbox_directory)
+
+        return DropboxStorageProvider(dropbox_directory=config.storage_root)
 
     if config.provider == StorageProvider.S3:
         if not config.s3_bucket:
             raise ValueError(
-                "S3 provider selected but s3_bucket is not set. "
-                "Set AWS_S3_BUCKET env var or s3_bucket in [Storage] section."
+                "S3 provider selected but no bucket is configured. "
+                "Set AWS_S3_BUCKET or s3_bucket in the config."
             )
+
         from utils.storage.s3_provider import S3StorageProvider
+
         return S3StorageProvider(
             bucket=config.s3_bucket,
             region=config.s3_region,
@@ -95,7 +143,7 @@ def get_storage_provider(config: Optional[StorageConfig] = None):
 
     if config.provider == StorageProvider.MEGA:
         from utils.storage.mega_provider import MegaStorageProvider
+
         return MegaStorageProvider()
 
     return None
-    
