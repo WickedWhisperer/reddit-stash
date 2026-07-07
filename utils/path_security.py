@@ -11,6 +11,7 @@ import re
 import logging
 from typing import Optional
 from dataclasses import dataclass
+from datetime import datetime
 
 
 logger = logging.getLogger(__name__)
@@ -330,13 +331,12 @@ class SecurePathHandler:
 
     def create_ordered_reddit_item_path(self, base_directory: str, subreddit_name: str,
                                         content_type: str, content_id: str,
-                                        order_index: Optional[int] = None) -> PathValidationResult:
+                                        created_utc=None) -> PathValidationResult:
         """
-        Create a stable per-item folder and markdown file path.
+        Create a deterministic folder + markdown path for one Reddit item.
 
-        The folder name can be prefixed with a zero-padded order index so cloud
-        providers list items in the same order they were processed/fetched.
-        The markdown filename itself stays compatible with older tooling.
+        The folder name includes a reverse-chronological sort key so newer items
+        appear first when cloud providers sort paths lexicographically.
         """
         valid_types = {'POST', 'COMMENT', 'SAVED_POST', 'SAVED_COMMENT',
                       'UPVOTE_POST', 'UPVOTE_COMMENT', 'GDPR_POST', 'GDPR_COMMENT'}
@@ -347,11 +347,35 @@ class SecurePathHandler:
                 issues=[f"Invalid content type: {content_type}"]
             )
 
-        item_name = f"{content_type}_{content_id}"
-        folder_name = f"{order_index:05d}_{item_name}" if order_index is not None else item_name
-        filename = f"{item_name}.md"
+        sort_key = _format_archive_sort_key(created_utc)
+        timestamp = _format_archive_timestamp(created_utc)
 
-        return self.create_safe_path(base_directory, subreddit_name, folder_name, filename)
+        folder_name = f"{sort_key}_{timestamp}_{content_type}_{content_id}"
+        filename = f"{content_type}_{content_id}.md"
+
+        return self.create_safe_path(base_directory, subreddit_name, content_type, folder_name, filename)
+
+
+def _format_archive_timestamp(created_utc) -> str:
+    """Format a Reddit timestamp for deterministic archive ordering."""
+    if created_utc in (None, "", 0):
+        return "00000000T000000Z"
+
+    try:
+        return datetime.utcfromtimestamp(float(created_utc)).strftime("%Y%m%dT%H%M%SZ")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return "00000000T000000Z"
+
+
+def _format_archive_sort_key(created_utc) -> str:
+    """Return a reverse-chronological key so newer items sort first lexicographically."""
+    try:
+        epoch = int(float(created_utc))
+    except (TypeError, ValueError, OSError, OverflowError):
+        return "9999999999999"
+
+    reverse_epoch = max(0, 9999999999999 - epoch)
+    return f"{reverse_epoch:013d}"
 
 
 # Global instance
@@ -401,4 +425,14 @@ def create_reddit_file_path(base_directory: str, subreddit_name: str,
     """
     return get_path_handler().create_reddit_file_path(
         base_directory, subreddit_name, content_type, content_id
-        )
+    )
+
+def create_ordered_reddit_item_path(base_directory: str, subreddit_name: str,
+                                    content_type: str, content_id: str,
+                                    created_utc=None) -> PathValidationResult:
+    """
+    Convenience function to create the ordered archive path used by the saver.
+    """
+    return get_path_handler().create_ordered_reddit_item_path(
+        base_directory, subreddit_name, content_type, content_id, created_utc=created_utc
+            )
