@@ -176,7 +176,7 @@ class DropboxStorageProvider:
                 result = self._dbx.files_list_folder_continue(result.cursor)
         except _ApiError as err:
             print(f"Failed to list Dropbox folder {remote_directory}: {err}")
-        return result_list
+        return sorted(result_list, key=lambda x: x.remote_path)
 
     def get_file_info(self, remote_path: str) -> Optional[StorageFileInfo]:
         self._require_client()
@@ -205,12 +205,15 @@ class DropboxStorageProvider:
         for info in self.list_files(remote_directory):
             dbx_hashes[info.remote_path] = info.content_hash
 
-        files_to_upload = [
-            (root, fname)
-            for root, _dirs, files in os.walk(local_directory)
-            for fname in files
-            if not fname.startswith(".")
-        ]
+        files_to_upload = []
+        for root, dirs, files in os.walk(local_directory):
+            dirs[:] = sorted(dirs)
+            for fname in sorted(files):
+                if fname.startswith('.'):
+                    continue
+                files_to_upload.append((root, fname))
+
+        files_to_upload.sort(key=lambda rf: os.path.relpath(os.path.join(rf[0], rf[1]), local_directory).replace(os.sep, '/'))
 
         uploaded = 0
         skipped = 0
@@ -222,10 +225,10 @@ class DropboxStorageProvider:
         def _process(root_and_name):
             nonlocal uploaded, skipped, failed, bytes_transferred
             root, fname = root_and_name
-            sanitized = _sanitize_filename(fname)
             file_path = os.path.join(root, fname)
             rel = os.path.relpath(file_path, local_directory).replace(os.sep, "/")
-            dbx_path = f"{remote_directory}/{rel}".replace(fname, sanitized)
+            dbx_rel = "/".join(_sanitize_filename(part) for part in rel.split("/"))
+            dbx_path = f"{remote_directory}/{dbx_rel}"
 
             # Skip unchanged files
             if dbx_path.lower() in dbx_hashes:
@@ -270,7 +273,7 @@ class DropboxStorageProvider:
         if check_type == "LOG":
             return self._download_log_only(remote_directory, local_directory, start)
 
-        remote_files = self.list_files(remote_directory)
+        remote_files = sorted(self.list_files(remote_directory), key=lambda info: info.remote_path)
 
         downloaded = 0
         skipped = 0
@@ -389,4 +392,4 @@ class DropboxStorageProvider:
                 failed=1,
                 elapsed_seconds=time.time() - start,
                 errors=[str(exc)],
-            )
+        )
