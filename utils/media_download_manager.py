@@ -4,6 +4,7 @@ import glob
 import logging
 import os
 import re
+import shutil
 import subprocess
 import threading
 from typing import Any, Dict, List, Optional
@@ -17,7 +18,6 @@ logger = logging.getLogger(__name__)
 
 try:
     import yt_dlp  # type: ignore
-
     YT_DLP_AVAILABLE = True
 except Exception:
     yt_dlp = None
@@ -52,7 +52,7 @@ VIDEO_PAGE_HOSTS = (
 def _trace(message: str) -> None:
     if REDGIFS_TRACE:
         print(f"[RedGifs] {message}", flush=True)
-        logger.info(message)
+    logger.info(message)
 
 
 def _host(url: str) -> str:
@@ -72,12 +72,7 @@ def _path(url: str) -> str:
 def _normalize(url: Optional[str]) -> str:
     if not url:
         return ""
-    return (
-        str(url)
-        .replace("\\/", "/")
-        .replace("&amp;", "&")
-        .strip()
-    )
+    return str(url).replace("\\/", "/").replace("&", "&").strip()
 
 
 def _is_reddit_media(url: str) -> bool:
@@ -93,32 +88,25 @@ def _is_redgifs(url: str) -> bool:
 def _is_video_page(url: str) -> bool:
     domain = _host(url)
     path = _path(url)
-
     if not domain:
         return False
-
     if any(domain.endswith(host) for host in VIDEO_PAGE_HOSTS):
         return True
-
     if path.endswith(".gifv"):
         return True
-
     return False
 
 
 def _is_direct_image(url: str) -> bool:
     domain = _host(url)
     path = _path(url)
-
     if path.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff")):
         return True
-
     if any(
         domain.endswith(host)
         for host in ("i.redd.it", "i.imgur.com", "preview.redd.it", "external-preview.redd.it")
     ):
         return True
-
     return False
 
 
@@ -173,7 +161,6 @@ def _extract_redgifs_id(url: str) -> Optional[str]:
         return None
 
     cleaned = url.split("?")[0].split("#")[0].strip()
-
     match = re.search(r"/(?:watch|ifr)/([A-Za-z0-9]+)", cleaned, re.IGNORECASE)
     if match:
         return match.group(1)
@@ -212,6 +199,7 @@ def _fetch_html(url: str) -> str:
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
     }
+
     try:
         response = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
         response.raise_for_status()
@@ -229,7 +217,6 @@ def _html_has_audio_hint(html_text: str) -> Optional[bool]:
         return True
     if re.search(r'"has[_-]?audio"\s*:\s*false', html_text, re.IGNORECASE):
         return False
-
     return None
 
 
@@ -257,7 +244,6 @@ def _extract_redgifs_candidates_from_html(html_text: str) -> Dict[str, List[str]
     ]
 
     raw_urls: List[str] = []
-
     for pattern in patterns:
         raw_urls.extend(re.findall(pattern, html_text, flags=re.IGNORECASE | re.DOTALL))
 
@@ -267,7 +253,6 @@ def _extract_redgifs_candidates_from_html(html_text: str) -> Dict[str, List[str]
         cleaned = _normalize(url)
         if not cleaned:
             continue
-
         lower = cleaned.lower()
 
         if any(token in lower for token in ("/watch/", "/ifr/")):
@@ -413,7 +398,6 @@ class MediaDownloadManager:
             }
 
             os.makedirs(output_dir, exist_ok=True)
-
             with yt_dlp.YoutubeDL(options) as ydl:  # type: ignore[attr-defined]
                 ydl.extract_info(url, download=True)
 
@@ -452,7 +436,6 @@ class MediaDownloadManager:
 
             if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
                 return final_path
-
             return None
         except Exception as exc:
             self._logger.debug(f"yt-dlp download failed for {url}: {exc}")
@@ -506,9 +489,10 @@ class MediaDownloadManager:
         def _try_candidate(candidate: str, source_kind: str) -> Optional[str]:
             if not candidate or candidate in tried:
                 return None
-            tried.add(candidate)
 
+            tried.add(candidate)
             _trace(f"Trying {source_kind} candidate: {candidate}")
+
             local_path = self._download_with_ytdlp(candidate, save_path)
             if not local_path:
                 _trace(f"{source_kind} candidate failed: {candidate}")
@@ -558,6 +542,38 @@ class MediaDownloadManager:
 
         return None
 
+    def _ensure_requested_path(self, cached_path: str, save_path: str) -> Optional[str]:
+        """
+        Ensure the caller receives the exact filename it asked for.
+
+        If the same URL is reused for a different gallery item, copy the cached
+        file into the requested path so gallery naming stays consistent.
+        """
+        try:
+            if not cached_path or not os.path.exists(cached_path) or os.path.getsize(cached_path) <= 0:
+                return None
+
+            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+
+            if os.path.abspath(cached_path) == os.path.abspath(save_path):
+                return cached_path
+
+            if os.path.exists(save_path):
+                if os.path.getsize(save_path) > 0:
+                    return save_path
+                try:
+                    os.remove(save_path)
+                except Exception:
+                    pass
+
+            shutil.copy2(cached_path, save_path)
+            return save_path
+        except Exception as exc:
+            self._logger.debug(
+                f"Failed to mirror cached file {cached_path} to {save_path}: {exc}"
+            )
+            return None
+
     def download_media(self, url: str, save_path: str) -> Optional[str]:
         """
         Download media and return the saved file path, or None on failure.
@@ -572,7 +588,9 @@ class MediaDownloadManager:
             if url in self._downloaded_urls:
                 cached = self._downloaded_urls[url]
                 if os.path.exists(cached) and os.path.getsize(cached) > 0:
-                    return cached
+                    materialized = self._ensure_requested_path(cached, save_path)
+                    if materialized:
+                        return materialized
                 self._downloaded_urls.pop(url, None)
 
         try:
@@ -682,6 +700,7 @@ def download_media_file(url: str, save_directory: str, file_id: str) -> Optional
 
     try:
         os.makedirs(save_directory, exist_ok=True)
+
         extension = _infer_media_extension(url)
         filename = f"{file_id}{extension}"
         save_path = os.path.join(save_directory, filename)
