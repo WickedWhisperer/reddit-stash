@@ -5,6 +5,7 @@ import logging
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Iterable, Tuple
 
 import prawcore
 from praw.models import Comment, Submission
@@ -12,7 +13,6 @@ from tqdm import tqdm
 
 from utils.env_config import get_ignore_tls_errors
 from utils.log_utils import log_file, save_file_log
-from utils.path_security import create_safe_path, create_reddit_file_path
 from utils.praw_helpers import safe_fetch_items_one_by_one
 from utils.save_utils import (
     _get_media_size,
@@ -21,82 +21,83 @@ from utils.save_utils import (
     save_submission,
 )
 from utils.time_utilities import dynamic_sleep
+from utils.path_security import create_safe_path, create_reddit_file_path
 
 logger = logging.getLogger(__name__)
 
-# Lock protecting concurrent access to created_dirs_cache (check-then-create pattern)
+# Lock protecting concurrent access to created_dirs_cache
 _dir_cache_lock = threading.Lock()
 
 # Dynamically determine the path to the root directory
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-# Construct the full path to the settings.ini file
 config_path = os.path.join(BASE_DIR, "settings.ini")
 
-# Load settings from the settings.ini file
 config = configparser.ConfigParser()
 config.read(config_path)
 
 save_type = config.get("Settings", "save_type", fallback="ALL").upper()
 check_type = config.get("Settings", "check_type", fallback="DIR").upper()
 
-
 def create_directory(subreddit_name, save_directory, created_dirs_cache):
     """Create the directory for saving data if it does not exist."""
     path_result = create_safe_path(save_directory, subreddit_name)
+
     if not path_result.is_safe:
-        logger.error(f"Unsafe subreddit name '{subreddit_name}': {path_result.issues}")
+        logger.error(
+            "Unsafe subreddit name '%s': %s", subreddit_name, path_result.issues
+        )
         fallback_name = "sanitized_subreddit"
         path_result = create_safe_path(save_directory, fallback_name)
         if not path_result.is_safe:
             raise ValueError(f"Cannot create safe directory path: {path_result.issues}")
 
     sub_dir = path_result.safe_path
-    with _dir_cache_lock:
-        if sub_dir not in created_dirs_cache:
-            os.makedirs(sub_dir, exist_ok=True)
-            created_dirs_cache.add(sub_dir)
-            logger.info(f"Created directory: {sub_dir}")
+    if sub_dir not in created_dirs_cache:
+        os.makedirs(sub_dir, exist_ok=True)
+        created_dirs_cache.add(sub_dir)
+        logger.info("Created directory: %s", sub_dir)
     return sub_dir
-
 
 def get_existing_files_from_log(file_log):
     """Return a set of unique keys based on the JSON log."""
     return set(file_log.keys())
 
-
 def get_existing_files_from_dir(save_directory):
     """Build a set of all existing files in the save directory using os.walk."""
     existing_files = set()
 
-    for root, _, files in os.walk(save_directory):
-        subreddit_name = os.path.basename(root)
-        for filename in files:
-            stem = os.path.splitext(filename)[0]
+    for root, _dirs, files in os.walk(save_directory):
+        rel_root = os.path.relpath(root, save_directory)
+        parts = [] if rel_root in (".", os.curdir) else rel_root.split(os.sep)
+        subreddit_name = parts[0] if parts else "unknown"
 
-            if stem.startswith("POST_"):
-                file_id = stem.split("POST_", 1)[1]
+        for file in files:
+            filename = os.path.splitext(file)[0]
+            content_type = None
+
+            if filename.startswith("POST_"):
+                file_id = filename.split("POST_", 1)[1]
                 content_type = "Submission"
-            elif stem.startswith("COMMENT_"):
-                file_id = stem.split("COMMENT_", 1)[1]
+            elif filename.startswith("COMMENT_"):
+                file_id = filename.split("COMMENT_", 1)[1]
                 content_type = "Comment"
-            elif stem.startswith("SAVED_POST_"):
-                file_id = stem.split("SAVED_POST_", 1)[1]
+            elif filename.startswith("SAVED_POST_"):
+                file_id = filename.split("SAVED_POST_", 1)[1]
                 content_type = "Submission"
-            elif stem.startswith("SAVED_COMMENT_"):
-                file_id = stem.split("SAVED_COMMENT_", 1)[1]
+            elif filename.startswith("SAVED_COMMENT_"):
+                file_id = filename.split("SAVED_COMMENT_", 1)[1]
                 content_type = "Comment"
-            elif stem.startswith("UPVOTE_POST_"):
-                file_id = stem.split("UPVOTE_POST_", 1)[1]
+            elif filename.startswith("UPVOTE_POST_"):
+                file_id = filename.split("UPVOTE_POST_", 1)[1]
                 content_type = "Submission"
-            elif stem.startswith("UPVOTE_COMMENT_"):
-                file_id = stem.split("UPVOTE_COMMENT_", 1)[1]
+            elif filename.startswith("UPVOTE_COMMENT_"):
+                file_id = filename.split("UPVOTE_COMMENT_", 1)[1]
                 content_type = "Comment"
-            elif stem.startswith("GDPR_POST_"):
-                file_id = stem.split("GDPR_POST_", 1)[1]
+            elif filename.startswith("GDPR_POST_"):
+                file_id = filename.split("GDPR_POST_", 1)[1]
                 content_type = "Submission"
-            elif stem.startswith("GDPR_COMMENT_"):
-                file_id = stem.split("GDPR_COMMENT_", 1)[1]
+            elif filename.startswith("GDPR_COMMENT_"):
+                file_id = filename.split("GDPR_COMMENT_", 1)[1]
                 content_type = "Comment"
             else:
                 continue
@@ -105,7 +106,6 @@ def get_existing_files_from_dir(save_directory):
             existing_files.add(unique_key)
 
     return existing_files
-
 
 def save_to_file(
     content,
@@ -120,7 +120,7 @@ def save_to_file(
     ignore_tls_errors=None,
 ):
     """Save content to a file using the specified save function."""
-    from utils.praw_helpers import RecoveredItem
+    from .praw_helpers import RecoveredItem
 
     is_recovered = isinstance(content, RecoveredItem)
     file_id = content.id
@@ -133,19 +133,19 @@ def save_to_file(
 
     unique_key = f"{file_id}-{subreddit_name}-{type(content).__name__}-{category}"
 
+    # Original behavior: if we already know about this item, do not resave it.
     if unique_key in existing_files:
         return True, 0
 
     path_result = create_safe_path(save_directory, subreddit_name)
     if not path_result.is_safe:
-        logger.error(f"Unsafe subreddit name '{subreddit_name}': {path_result.issues}")
+        logger.error("Unsafe subreddit name '%s': %s", subreddit_name, path_result.issues)
         fallback_name = "sanitized_subreddit"
         path_result = create_safe_path(save_directory, fallback_name)
         if not path_result.is_safe:
             raise ValueError(f"Cannot create safe directory path: {path_result.issues}")
 
     sub_dir = path_result.safe_path
-
     with _dir_cache_lock:
         if sub_dir not in created_dirs_cache:
             os.makedirs(sub_dir, exist_ok=True)
@@ -155,7 +155,12 @@ def save_to_file(
         _reset_media_tracker()
 
         with open(file_path, "w", encoding="utf-8") as f:
-            save_function(content, f, unsave=unsave, ignore_tls_errors=ignore_tls_errors)
+            save_function(
+                content,
+                f,
+                unsave=unsave,
+                ignore_tls_errors=ignore_tls_errors,
+            )
 
         media_size = _get_media_size()
 
@@ -179,14 +184,13 @@ def save_to_file(
         return False, media_size
 
     except Exception as e:
-        logger.error(f"Failed to save {file_path}: {e}")
+        logger.error("Failed to save %s: %s", file_path, e)
         try:
             if os.path.exists(file_path):
                 os.remove(file_path)
         except OSError:
             pass
         return False, 0
-
 
 def handle_dynamic_sleep(item):
     """Handle dynamic sleep based on the type of Reddit item."""
@@ -197,67 +201,46 @@ def handle_dynamic_sleep(item):
     else:
         dynamic_sleep(0)
 
-
 def _clone_reddit(reddit):
-    """Create a new PRAW Reddit instance with the same credentials for thread-safe parallel use."""
+    """Create a new PRAW Reddit instance with same credentials for thread-safe parallel use."""
+    import praw
+
+    return praw.Reddit(
+        client_id=reddit.config.client_id,
+        client_secret=reddit.config.client_secret,
+        username=reddit.config.username,
+        password=reddit.config.password,
+        user_agent=reddit.config.user_agent,
+    )
+
+def _fetch_items(reddit_instance, fetch_method_name, limit, label):
+    """Fetch items from a PRAW user endpoint with batch-then-one-by-one fallback."""
+    user = reddit_instance.user.me()
+
+    if fetch_method_name in ("submissions", "comments"):
+        listing = getattr(user, fetch_method_name)
+        items_iter = listing.new(limit=limit)
+    else:
+        items_iter = getattr(user, fetch_method_name)(limit=limit)
+
     try:
-        import praw
-    except Exception:
-        return reddit
-
-    kwargs = {}
-    for attr in (
-        "client_id",
-        "client_secret",
-        "username",
-        "password",
-        "refresh_token",
-        "user_agent",
-        "ratelimit_seconds",
-        "timeout",
-    ):
-        value = getattr(reddit, attr, None)
-        if value not in (None, "", "None"):
-            kwargs[attr] = value
-
-    try:
-        if kwargs:
-            return praw.Reddit(**kwargs)
-    except Exception:
-        pass
-
-    return reddit
-
-
-def _fetch_items(reddit, method, limit, label):
-    """Fetch Reddit items using the shared helper."""
-    try:
-        return list(safe_fetch_items_one_by_one(reddit, method, limit, label))
-    except TypeError:
-        return list(safe_fetch_items_one_by_one(reddit, method, limit))
-    except prawcore.exceptions.PrawcoreException:
-        raise
-    except Exception:
-        return []
-
+        return list(items_iter)
+    except prawcore.exceptions.NotFound:
+        logger.warning("Batch fetch of %s failed with 404, using safe iteration", label)
+        if fetch_method_name in ("submissions", "comments"):
+            listing = getattr(user, fetch_method_name)
+            items_iter = listing.new(limit=limit)
+        else:
+            items_iter = getattr(user, fetch_method_name)(limit=limit)
+        return safe_fetch_items_one_by_one(items_iter, label)
 
 def _merge_results(*results):
-    processed_count = 0
-    skipped_count = 0
-    total_size = 0
-    total_media_size = 0
-
-    for result in results:
-        if not result:
-            continue
-        p, s, ts, tms = result
-        processed_count += p
-        skipped_count += s
-        total_size += ts
-        total_media_size += tms
-
-    return processed_count, skipped_count, total_size, total_media_size
-
+    """Merge (processed, skipped, size, media_size) tuples from parallel threads."""
+    processed = sum(r[0] for r in results)
+    skipped = sum(r[1] for r in results)
+    size = sum(r[2] for r in results)
+    media_size = sum(r[3] for r in results)
+    return processed, skipped, size, media_size
 
 def _process_submissions_batch(
     submissions,
@@ -271,7 +254,6 @@ def _process_submissions_batch(
     tqdm_desc="Processing Submissions",
     tqdm_position=0,
 ):
-    """Process a batch of submissions in a single thread."""
     processed_count = 0
     skipped_count = 0
     total_size = 0
@@ -284,9 +266,10 @@ def _process_submissions_batch(
             category,
             submission.id,
         )
-
         if not path_result.is_safe:
-            logger.error(f"Unsafe path for submission {submission.id}: {path_result.issues}")
+            logger.error(
+                "Unsafe path for submission %s: %s", submission.id, path_result.issues
+            )
             continue
 
         file_path = path_result.safe_path
@@ -309,7 +292,6 @@ def _process_submissions_batch(
 
         processed_count += 1
         total_media_size += media_size
-
         try:
             if os.path.exists(file_path):
                 total_size += os.path.getsize(file_path)
@@ -319,7 +301,6 @@ def _process_submissions_batch(
         handle_dynamic_sleep(submission)
 
     return processed_count, skipped_count, total_size, total_media_size
-
 
 def _process_comments_batch(
     comments,
@@ -333,7 +314,6 @@ def _process_comments_batch(
     tqdm_desc="Processing Comments",
     tqdm_position=1,
 ):
-    """Process a batch of comments in a single thread."""
     processed_count = 0
     skipped_count = 0
     total_size = 0
@@ -346,9 +326,8 @@ def _process_comments_batch(
             category,
             comment.id,
         )
-
         if not path_result.is_safe:
-            logger.error(f"Unsafe path for comment {comment.id}: {path_result.issues}")
+            logger.error("Unsafe path for comment %s: %s", comment.id, path_result.issues)
             continue
 
         file_path = path_result.safe_path
@@ -371,7 +350,6 @@ def _process_comments_batch(
 
         processed_count += 1
         total_media_size += media_size
-
         try:
             if os.path.exists(file_path):
                 total_size += os.path.getsize(file_path)
@@ -381,7 +359,6 @@ def _process_comments_batch(
         handle_dynamic_sleep(comment)
 
     return processed_count, skipped_count, total_size, total_media_size
-
 
 def _process_mixed_items(
     items,
@@ -396,7 +373,6 @@ def _process_mixed_items(
     tqdm_desc="Processing Items",
     tqdm_position=0,
 ):
-    """Process mixed submissions and comments in a single thread."""
     processed_count = 0
     skipped_count = 0
     total_size = 0
@@ -418,9 +394,8 @@ def _process_mixed_items(
             category,
             item.id,
         )
-
         if not path_result.is_safe:
-            logger.error(f"Unsafe path for item {item.id}: {path_result.issues}")
+            logger.error("Unsafe path for item %s: %s", item.id, path_result.issues)
             continue
 
         file_path = path_result.safe_path
@@ -443,7 +418,6 @@ def _process_mixed_items(
 
         processed_count += 1
         total_media_size += media_size
-
         try:
             if os.path.exists(file_path):
                 total_size += os.path.getsize(file_path)
@@ -453,7 +427,6 @@ def _process_mixed_items(
         handle_dynamic_sleep(item)
 
     return processed_count, skipped_count, total_size, total_media_size
-
 
 def save_user_activity(reddit, save_directory, file_log, unsave=False):
     """Save user's posts, comments, saved items, and upvoted content."""
@@ -491,7 +464,6 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
             for method, label in endpoints:
                 r = _clone_reddit(reddit)
                 futures[label] = pool.submit(_fetch_items, r, method, 1000, label)
-
             for label, future in futures.items():
                 fetched[label] = future.result()
 
@@ -536,7 +508,6 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
                 tqdm_position=3,
                 **shared_args,
             )
-
             results = [f.result() for f in [f1, f2, f3, f4]]
 
         processed_count, skipped_count, total_size, total_media_size = _merge_results(*results)
@@ -592,7 +563,6 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
             tqdm_desc="Upvoted Items",
             **shared_args,
         )
-
     else:
         raise ValueError(f"Unknown save_type: {save_type}")
 
