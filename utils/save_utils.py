@@ -257,7 +257,7 @@ def _save_submission_media(
 
         if gallery_images:
             f.write(f"**Gallery ({len(gallery_images)} images)**\n\n")
-            max_workers = media_config.get_media_config().get("max_concurrent_downloads", 3)
+            max_workers = media_config.max_concurrent_downloads()
 
             def _download_gallery_item(args):
                 idx, info = args
