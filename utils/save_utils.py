@@ -41,21 +41,20 @@ def extract_video_id(url: str) -> Optional[str]:
     return None
 
 
-def _resolve_media_save_dir(save_dir: str) -> str:
+def _resolve_media_save_dir(path: str) -> str:
     """
-    Keep media files beside the markdown file, matching the original repo layout.
+    Save media beside each markdown file in its own dedicated folder.
 
-    If a caller accidentally passes a nested media directory, collapse it back
-    to the parent folder so files do not end up under subreddit/media/.
+    Examples:
+      reddit/r_Python/POST_abc123.md -> reddit/r_Python/POST_abc123/
+      reddit/r_Python/COMMENT_xyz789.md -> reddit/r_Python/COMMENT_xyz789/
     """
-    if not save_dir:
-        return save_dir
+    if not path:
+        return path
 
-    base = os.path.basename(os.path.normpath(save_dir))
-    if base.lower() == "media":
-        parent = os.path.dirname(os.path.normpath(save_dir))
-        return parent or save_dir
-    return save_dir
+    media_dir = os.path.splitext(path)[0]
+    os.makedirs(media_dir, exist_ok=True)
+    return media_dir
 
 
 def download_image(
@@ -67,8 +66,7 @@ def download_image(
     """
     Download media using the centralized media download manager.
 
-    Returns:
-        tuple[str | None, int]: (file_path, file_size)
+    Returns: tuple[str | None, int]: (file_path, file_size)
     """
     try:
         from .media_download_manager import download_media_file
@@ -111,14 +109,22 @@ def _download_image_fallback(
         response.raise_for_status()
 
         extension = os.path.splitext(image_url)[1]
-        if extension.lower() not in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".webm"]:
+        if extension.lower() not in [
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".gif",
+            ".webp",
+            ".mp4",
+            ".webm",
+        ]:
             extension = ".jpg"
 
         save_directory = _resolve_media_save_dir(save_directory)
         image_filename = f"{submission_id}{extension}"
         image_path = os.path.join(save_directory, image_filename)
-
         os.makedirs(save_directory, exist_ok=True)
+
         with open(image_path, "wb") as f:
             f.write(response.content)
 
@@ -240,9 +246,7 @@ def _save_submission_media(
     ignore_tls_errors: Optional[bool],
     context_mode: bool,
 ) -> None:
-    """
-    Handle media detection and download for a submission's link post.
-    """
+    """Handle media detection and download for a submission's link post."""
     save_dir = _resolve_media_save_dir(save_dir)
 
     # 1. Gallery posts
@@ -271,13 +275,14 @@ def _save_submission_media(
                 return idx, download_image(info["url"], save_dir, fid, ignore_tls_errors)
 
             results = {}
-
             if context_mode:
                 for i, m in enumerate(gallery_images, 1):
                     idx, (path, size) = _download_gallery_item((i, m))
                     results[idx] = (path, size)
                     if not path:
-                        logger.info(f"Context mode: gallery image {idx} failed, skipping rest")
+                        logger.info(
+                            f"Context mode: gallery image {idx} failed, skipping rest"
+                        )
                         break
             else:
                 with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -369,22 +374,20 @@ def save_submission(
     recovery_metadata=None,
     context_mode: bool = False,
 ) -> None:
-    """
-    Save a submission and its metadata, optionally unsaving it after.
-    """
+    """Save a submission and its metadata, optionally unsaving it after."""
     try:
         is_recovered = isinstance(submission, RecoveredItem)
 
         if recovery_metadata or is_recovered:
             if is_recovered and hasattr(submission, "recovery_result"):
                 recovery_metadata = submission.recovery_result
-            if recovery_metadata:
-                recovery_banner = create_recovery_metadata_markdown(recovery_metadata)
-                f.write(recovery_banner)
-                f.write("---\n")
+
+        if recovery_metadata:
+            recovery_banner = create_recovery_metadata_markdown(recovery_metadata)
+            f.write(recovery_banner)
+            f.write("---\n")
 
         f.write(f"id: {submission.id}\n")
-
         if is_recovered:
             recovered_data = submission.recovered_data if hasattr(submission, "recovered_data") else {}
             f.write(f'subreddit: {recovered_data.get("subreddit", "[unknown]")}\n')
@@ -395,9 +398,9 @@ def save_submission(
             f.write(f"subreddit: /r/{submission.subreddit.display_name}\n")
             f.write(f"timestamp: {format_date(submission.created_utc)}\n")
             f.write(f"author: /u/{submission.author.name if submission.author else '[deleted]'}\n")
-            if submission.link_flair_text:
-                f.write(f"flair: {submission.link_flair_text}\n")
 
+        if submission.link_flair_text:
+            f.write(f"flair: {submission.link_flair_text}\n")
         if not is_recovered:
             f.write(f"comments: {submission.num_comments}\n")
         f.write(f"permalink: https://reddit.com{submission.permalink}\n")
@@ -414,10 +417,12 @@ def save_submission(
         else:
             if hasattr(submission, "selftext") and submission.selftext:
                 f.write(submission.selftext)
-
             f.write("\n\n---\n\n")
+
             media_config = get_media_config()
-            save_dir = os.path.dirname(f.name)
+
+            # Use a per-item directory derived from the markdown filename.
+            save_dir = _resolve_media_save_dir(f.name)
 
             try:
                 _save_submission_media(
@@ -459,20 +464,18 @@ def save_comment_and_context(
     ignore_tls_errors: Optional[bool] = None,
     recovery_metadata=None,
 ) -> None:
-    """
-    Save a comment, its context, and any child comments.
-    """
+    """Save a comment, its context, and any child comments."""
     try:
         is_recovered = isinstance(comment, RecoveredItem)
 
         if recovery_metadata or is_recovered:
             if is_recovered and hasattr(comment, "recovery_result"):
                 recovery_metadata = comment.recovery_result
-            if recovery_metadata:
-                recovery_banner = create_recovery_metadata_markdown(recovery_metadata)
-                f.write(recovery_banner)
 
-        f.write("---\n")
+        if recovery_metadata:
+            recovery_banner = create_recovery_metadata_markdown(recovery_metadata)
+            f.write(recovery_banner)
+            f.write("---\n")
 
         if is_recovered:
             recovered_data = comment.recovered_data if hasattr(comment, "recovered_data") else {}
@@ -488,7 +491,6 @@ def save_comment_and_context(
 
         if not is_recovered:
             parent = comment.parent()
-
             if isinstance(parent, Submission):
                 f.write(f'## Context: Post by /u/{parent.author.name if parent.author else "[deleted]"}\n')
                 f.write(f"- **Title:** {parent.title}\n")
@@ -496,16 +498,14 @@ def save_comment_and_context(
                     f"- **Upvotes:** {parent.score} | "
                     f"**Permalink:** [Link](https://reddit.com{parent.permalink})\n"
                 )
-
                 if parent.is_self:
                     f.write(f"{parent.selftext}\n\n")
                 else:
                     if hasattr(parent, "selftext") and parent.selftext:
                         f.write(f"{parent.selftext}\n\n")
                     f.write(f"[Link to post content]({parent.url})\n\n")
-
-                f.write("\n\n## Full Post Context:\n\n")
-                save_submission(parent, f, ignore_tls_errors=ignore_tls_errors, context_mode=True)
+                    f.write("\n\n## Full Post Context:\n\n")
+                    save_submission(parent, f, ignore_tls_errors=ignore_tls_errors, context_mode=True)
 
             elif isinstance(parent, Comment):
                 f.write(f'## Context: Parent Comment by /u/{parent.author.name if parent.author else "[deleted]"}\n')
@@ -551,8 +551,8 @@ def process_comments(
         f.write(f"{bq}*Upvotes: {comment.score} | [Permalink](https://reddit.com{comment.permalink})*\n\n")
 
         comment_body = comment.body if comment.body else "[deleted]"
-
         image_url = None
+
         if any(comment_body.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
             potential_url = comment_body.split()[-1]
             if potential_url.startswith(("http://", "https://")) and "." in potential_url:
@@ -567,7 +567,7 @@ def process_comments(
 
             image_path, image_size = download_image(
                 image_url,
-                os.path.dirname(f.name),
+                _resolve_media_save_dir(f.name),
                 comment.id,
                 ignore_tls_errors,
             )
@@ -585,6 +585,3 @@ def process_comments(
 
         if not simple_format and comment.replies:
             process_comments(comment.replies, f, depth + 1, simple_format, ignore_tls_errors)
-
-        if depth == 0:
-            f.write("---\n")
