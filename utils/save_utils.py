@@ -57,6 +57,88 @@ def _resolve_media_save_dir(path: str) -> str:
     return media_dir
 
 
+
+
+def _candidate_media_directories(save_directory: str) -> list[str]:
+    """Return directories that may already contain a downloaded media file.
+
+    The first candidate is the per-post/per-comment media directory.
+    The second candidate is the legacy flat folder (the parent directory),
+    which keeps existing archives from re-downloading after the layout change.
+    """
+    if not save_directory:
+        return []
+
+    normalized = os.path.normpath(save_directory)
+    candidates = [normalized]
+
+    legacy_parent = os.path.dirname(normalized)
+    if legacy_parent and legacy_parent not in candidates:
+        candidates.append(legacy_parent)
+
+    # If the resolved path is already a file path, include its directory too.
+    if os.path.isfile(normalized):
+        directory = os.path.dirname(normalized)
+        if directory and directory not in candidates:
+            candidates.insert(0, directory)
+
+    return candidates
+
+
+def _media_url_extension(image_url: str) -> str:
+    """Best-effort extension guess from a media URL."""
+    if not image_url:
+        return ""
+
+    try:
+        path = urlparse(image_url).path
+    except Exception:
+        path = image_url
+
+    ext = os.path.splitext(path)[1].lower()
+    if ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".webm", ".gifv", ".bmp", ".tiff"}:
+        return ext
+    return ""
+
+
+def _find_existing_media_file(save_directory: str, media_id: str, image_url: str | None = None) -> str | None:
+    """Return an already-downloaded media path if one exists.
+
+    This prevents re-downloading when the archive layout changes from flat
+    subreddit folders to per-post/per-comment folders.
+    """
+    if not save_directory or not media_id:
+        return None
+
+    media_id = str(media_id).strip()
+    if not media_id:
+        return None
+
+    expected_ext = _media_url_extension(image_url or "")
+    candidates = _candidate_media_directories(save_directory)
+
+    for directory in candidates:
+        if not directory or not os.path.isdir(directory):
+            continue
+
+        if expected_ext:
+            exact = os.path.join(directory, f"{media_id}{expected_ext}")
+            if os.path.isfile(exact):
+                return exact
+
+        try:
+            for name in sorted(os.listdir(directory)):
+                if name == "file_log.json":
+                    continue
+                if not name.startswith(media_id):
+                    continue
+                path = os.path.join(directory, name)
+                if os.path.isfile(path):
+                    return path
+        except OSError:
+            continue
+
+    return None
 def download_image(
     image_url: str,
     save_directory: str,
@@ -72,6 +154,14 @@ def download_image(
         from .media_download_manager import download_media_file
 
         save_directory = _resolve_media_save_dir(save_directory)
+
+        existing_path = _find_existing_media_file(save_directory, submission_id, image_url)
+        if existing_path:
+            try:
+                return existing_path, os.path.getsize(existing_path)
+            except OSError:
+                return existing_path, 0
+
         result_path = download_media_file(image_url, save_directory, submission_id)
 
         if result_path:
@@ -100,6 +190,14 @@ def _download_image_fallback(
         if ignore_tls_errors is None:
             ignore_tls_errors = get_ignore_tls_errors()
 
+        save_directory = _resolve_media_save_dir(save_directory)
+        existing_path = _find_existing_media_file(save_directory, submission_id, image_url)
+        if existing_path:
+            try:
+                return existing_path, os.path.getsize(existing_path)
+            except OSError:
+                return existing_path, 0
+
         request_kwargs = {}
         if ignore_tls_errors:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -120,7 +218,6 @@ def _download_image_fallback(
         ]:
             extension = ".jpg"
 
-        save_directory = _resolve_media_save_dir(save_directory)
         image_filename = f"{submission_id}{extension}"
         image_path = os.path.join(save_directory, image_filename)
         os.makedirs(save_directory, exist_ok=True)
@@ -138,7 +235,8 @@ def _download_image_fallback(
         return None, 0
 
 
-def _is_image_url(url: str) -> bool:
+def _is_image_url(
+url: str) -> bool:
     """Check if a URL points to a downloadable image."""
     if not url:
         return False
