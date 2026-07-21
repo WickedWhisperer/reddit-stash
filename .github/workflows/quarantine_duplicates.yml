@@ -4,9 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       archive_root:
-        description: Archive root directory relative to the GitHub Actions workspace
+        description: Local folder name to download the Mega archive into
         required: true
         default: reddit_mega
+      remote_directory:
+        description: Remote directory on the Mega remote to scan (matches dropbox_directory/storage_root in mega_settings.ini)
+        required: true
+        default: reddit
       quarantine_name:
         description: Folder name used to store moved duplicates
         required: true
@@ -17,7 +21,7 @@ on:
         type: boolean
         default: false
       apply:
-        description: Move duplicates into quarantine instead of previewing
+        description: Move duplicates into quarantine AND delete them from Mega (unchecked = dry run/preview only, nothing on Mega is touched)
         required: false
         type: boolean
         default: false
@@ -34,46 +38,71 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Copy duplicate script
+      - name: Install rclone
         run: |
-          mkdir -p scripts
-          cp reddit_stash_dedupe_quarantine.py scripts/reddit_stash_dedupe_quarantine.py
+          curl https://rclone.org/install.sh | sudo bash
 
-      - name: Resolve archive folder
-        id: resolve
-        shell: bash
-        run: |
-          set -euo pipefail
-          ROOT="${{ github.workspace }}/${{ inputs.archive_root }}"
-
-          if [ -d "$ROOT" ]; then
-            echo "archive_root=$ROOT" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Try to locate the folder anywhere inside the workspace.
-          FOUND="$(find "${{ github.workspace }}" -type d -name "${{ inputs.archive_root }}" | head -n 1 || true)"
-          if [ -n "$FOUND" ]; then
-            echo "archive_root=$FOUND" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "Archive folder not found."
-          echo "Looked for: $ROOT"
-          echo "Workspace contents:"
-          find "${{ github.workspace }}" -maxdepth 3 -mindepth 1 -print | sort
-
-          exit 1
-
-      - name: Run duplicate quarantine
-        shell: bash
+      - name: Configure Mega remote
+        env:
+          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
+          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
         run: |
           set -euo pipefail
-          python scripts/reddit_stash_dedupe_quarantine.py "${{ steps.resolve.outputs.archive_root }}" --quarantine "${{ inputs.quarantine_name }}" ${{ inputs.keep_oldest && '--keep-oldest' || '' }} ${{ inputs.apply && '--apply' || '' }}
+          if [ -z "${MEGA_EMAIL:-}" ] || [ -z "${MEGA_PASSWORD:-}" ]; then
+            echo "::error::MEGA_EMAIL / MEGA_PASSWORD secrets are not set."
+            exit 1
+          fi
+          rclone config create mega mega user "$MEGA_EMAIL" pass "$MEGA_PASSWORD" --non-interactive
 
-      - name: Upload quarantine folder
+      - name: Download full archive from Mega
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ inputs.archive_root }}"
+          # Full content download, independent of check_type=LOG used by the
+          # regular scraper workflow — this job needs the actual files, not
+          # just file_log.json, in order to hash and compare them.
+          rclone copy "mega:${{ inputs.remote_directory }}" "${{ inputs.archive_root }}" \
+            --transfers 4 --checkers 8 --low-level-retries 20 --retries 10 --progress
+
+      - name: Run duplicate quarantine (dry run preview)
+        if: ${{ !inputs.apply }}
+        run: |
+          set -euo pipefail
+          python reddit_stash_dedupe_quarantine.py "${{ inputs.archive_root }}" \
+            --quarantine "${{ inputs.quarantine_name }}" \
+            ${{ inputs.keep_oldest && '--keep-oldest' || '' }}
+
+      - name: Run duplicate quarantine (apply)
+        if: ${{ inputs.apply }}
+        run: |
+          set -euo pipefail
+          python reddit_stash_dedupe_quarantine.py "${{ inputs.archive_root }}" \
+            --quarantine "${{ inputs.quarantine_name }}" \
+            --manifest "${{ inputs.archive_root }}/_quarantine_manifest.txt" \
+            ${{ inputs.keep_oldest && '--keep-oldest' || '' }} \
+            --apply
+
+      - name: Delete quarantined duplicates from Mega
+        if: ${{ inputs.apply }}
+        run: |
+          set -euo pipefail
+          manifest="${{ inputs.archive_root }}/_quarantine_manifest.txt"
+          if [ ! -s "$manifest" ]; then
+            echo "No duplicates found — nothing to delete on Mega."
+            exit 0
+          fi
+          while IFS= read -r rel_path; do
+            [ -z "$rel_path" ] && continue
+            echo "Deleting mega:${{ inputs.remote_directory }}/$rel_path"
+            rclone deletefile "mega:${{ inputs.remote_directory }}/$rel_path" || \
+              echo "::warning::Could not delete $rel_path from Mega (already gone?)"
+          done < "$manifest"
+
+      - name: Upload quarantine folder + manifest
         if: ${{ inputs.apply }}
         uses: actions/upload-artifact@v4
         with:
           name: duplicate-quarantine
-          path: ${{ steps.resolve.outputs.archive_root }}/${{ inputs.quarantine_name }}
+          path: |
+            ${{ inputs.archive_root }}/${{ inputs.quarantine_name }}
+            ${{ inputs.archive_root }}/_quarantine_manifest.txt
