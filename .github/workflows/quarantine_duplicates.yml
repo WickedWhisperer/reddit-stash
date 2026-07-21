@@ -1,27 +1,19 @@
-name: Quarantine exact duplicates
+name: Quarantine exact duplicates (Mega)
 
 on:
   workflow_dispatch:
     inputs:
-      archive_root:
-        description: Local folder name to download the Mega archive into
-        required: true
-        default: reddit_mega
       remote_directory:
         description: Remote directory on the Mega remote to scan (matches dropbox_directory/storage_root in mega_settings.ini)
         required: true
         default: reddit
-      quarantine_name:
-        description: Folder name used to store moved duplicates
-        required: true
-        default: _duplicates_quarantine
-      keep_oldest:
-        description: Keep the oldest file in each duplicate set
+      skip_verify:
+        description: Skip SHA-256 verification and trust filename+size matches (faster, slightly riskier)
         required: false
         type: boolean
         default: false
       apply:
-        description: Move duplicates into quarantine AND delete them from Mega (unchecked = dry run/preview only, nothing on Mega is touched)
+        description: Actually delete confirmed duplicates from Mega (unchecked = dry run/preview only)
         required: false
         type: boolean
         default: false
@@ -54,55 +46,25 @@ jobs:
           fi
           rclone config create mega mega user "$MEGA_EMAIL" pass "$MEGA_PASSWORD" --non-interactive
 
-      - name: Download full archive from Mega
+      # NOTE: this deliberately does NOT do a full `rclone copy` of the
+      # archive anymore. That downloads every byte of every file (multi-GB,
+      # throttled hard by Mega's free-tier bandwidth cap) just to find a
+      # handful of duplicates. mega_dedupe_remote.py lists file metadata
+      # (path + size) with `rclone lsjson`, which transfers no file content,
+      # and only downloads the small number of actual candidate duplicates
+      # to verify them with a real hash before deleting anything.
+      - name: Find & quarantine duplicates directly on Mega
         run: |
           set -euo pipefail
-          mkdir -p "${{ inputs.archive_root }}"
-          # Full content download, independent of check_type=LOG used by the
-          # regular scraper workflow — this job needs the actual files, not
-          # just file_log.json, in order to hash and compare them.
-          rclone copy "mega:${{ inputs.remote_directory }}" "${{ inputs.archive_root }}" \
-            --transfers 4 --checkers 8 --low-level-retries 20 --retries 10 --progress
+          python mega_dedupe_remote.py "mega:${{ inputs.remote_directory }}" \
+            --manifest quarantine_manifest.txt \
+            ${{ inputs.skip_verify && '--skip-verify' || '' }} \
+            ${{ inputs.apply && '--apply' || '' }}
 
-      - name: Run duplicate quarantine (dry run preview)
-        if: ${{ !inputs.apply }}
-        run: |
-          set -euo pipefail
-          python reddit_stash_dedupe_quarantine.py "${{ inputs.archive_root }}" \
-            --quarantine "${{ inputs.quarantine_name }}" \
-            ${{ inputs.keep_oldest && '--keep-oldest' || '' }}
-
-      - name: Run duplicate quarantine (apply)
-        if: ${{ inputs.apply }}
-        run: |
-          set -euo pipefail
-          python reddit_stash_dedupe_quarantine.py "${{ inputs.archive_root }}" \
-            --quarantine "${{ inputs.quarantine_name }}" \
-            --manifest "${{ inputs.archive_root }}/_quarantine_manifest.txt" \
-            ${{ inputs.keep_oldest && '--keep-oldest' || '' }} \
-            --apply
-
-      - name: Delete quarantined duplicates from Mega
-        if: ${{ inputs.apply }}
-        run: |
-          set -euo pipefail
-          manifest="${{ inputs.archive_root }}/_quarantine_manifest.txt"
-          if [ ! -s "$manifest" ]; then
-            echo "No duplicates found — nothing to delete on Mega."
-            exit 0
-          fi
-          while IFS= read -r rel_path; do
-            [ -z "$rel_path" ] && continue
-            echo "Deleting mega:${{ inputs.remote_directory }}/$rel_path"
-            rclone deletefile "mega:${{ inputs.remote_directory }}/$rel_path" || \
-              echo "::warning::Could not delete $rel_path from Mega (already gone?)"
-          done < "$manifest"
-
-      - name: Upload quarantine folder + manifest
-        if: ${{ inputs.apply }}
+      - name: Upload manifest
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: duplicate-quarantine
-          path: |
-            ${{ inputs.archive_root }}/${{ inputs.quarantine_name }}
-            ${{ inputs.archive_root }}/_quarantine_manifest.txt
+          name: duplicate-manifest
+          path: quarantine_manifest.txt
+          if-no-files-found: ignore
