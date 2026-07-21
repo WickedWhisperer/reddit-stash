@@ -1,0 +1,50 @@
+name: Quarantine exact duplicates
+
+on:
+  workflow_dispatch:
+    inputs:
+      archive_root:
+        description: Archive root directory in the runner workspace
+        required: true
+        default: reddit_mega
+      quarantine_name:
+        description: Folder name used to store moved duplicates
+        required: true
+        default: _duplicates_quarantine
+      keep_oldest:
+        description: Keep the oldest file in each duplicate set
+        required: false
+        type: boolean
+        default: false
+      apply:
+        description: Move duplicates instead of just listing them
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  quarantine:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Copy duplicate script
+        run: |
+          mkdir -p scripts
+          cp reddit_stash_dedupe_quarantine.py scripts/reddit_stash_dedupe_quarantine.py
+
+      - name: Run duplicate quarantine
+        run: |
+          python scripts/reddit_stash_dedupe_quarantine.py "${{ inputs.archive_root }}" --quarantine "${{ inputs.quarantine_name }}" ${{ inputs.keep_oldest && '--keep-oldest' || '' }} ${{ inputs.apply && '--apply' || '' }}
+
+      - name: Upload quarantine folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: duplicate-quarantine
+          path: ${{ inputs.archive_root }}/${{ inputs.quarantine_name }}
