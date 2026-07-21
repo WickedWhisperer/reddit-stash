@@ -11,6 +11,7 @@ import prawcore
 from praw.models import Comment, Submission
 from tqdm import tqdm
 
+from utils.config_paths import get_settings_file_path
 from utils.env_config import get_ignore_tls_errors
 from utils.log_utils import log_file, save_file_log
 from utils.praw_helpers import safe_fetch_items_one_by_one
@@ -28,15 +29,34 @@ logger = logging.getLogger(__name__)
 # Lock protecting concurrent access to created_dirs_cache
 _dir_cache_lock = threading.Lock()
 
-# Dynamically determine the path to the root directory
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-config_path = os.path.join(BASE_DIR, "settings.ini")
 
-config = configparser.ConfigParser()
-config.read(config_path)
+def _load_active_config() -> configparser.ConfigParser:
+    """Load the *active* settings file (respects SETTINGS_FILE / MEGA_SETTINGS_FILE).
 
-save_type = config.get("Settings", "save_type", fallback="ALL").upper()
-check_type = config.get("Settings", "check_type", fallback="DIR").upper()
+    Previously this module always read the repo-root settings.ini directly,
+    regardless of which settings file the running workflow selected. That
+    meant a Mega run (SETTINGS_FILE=mega_settings.ini, check_type=LOG) would
+    silently pick up check_type=DIR from settings.ini instead, which breaks
+    the dedup check (see save_type/check_type below).
+    """
+    parser = configparser.ConfigParser()
+    parser.read(get_settings_file_path())
+    return parser
+
+
+def _get_save_type() -> str:
+    return _load_active_config().get("Settings", "save_type", fallback="ALL").upper()
+
+
+def _get_check_type() -> str:
+    return _load_active_config().get("Settings", "check_type", fallback="DIR").upper()
+
+
+# Kept as module-level names for backward compatibility with any external
+# callers/tests, but computed lazily so they always reflect the active
+# settings file at call time rather than being frozen at import time.
+save_type = _get_save_type()
+check_type = _get_check_type()
 
 def create_directory(subreddit_name, save_directory, created_dirs_cache):
     """Create the directory for saving data if it does not exist."""
@@ -432,14 +452,15 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
     """Save user's posts, comments, saved items, and upvoted content."""
     ignore_tls_errors = get_ignore_tls_errors()
 
-    if check_type == "LOG":
+    active_check_type = _get_check_type()
+    if active_check_type == "LOG":
         print("Check type is LOG. Using JSON log to find existing files.")
         existing_files = get_existing_files_from_log(file_log)
-    elif check_type == "DIR":
+    elif active_check_type == "DIR":
         print("Check type is DIR. Using directory scan to find existing files.")
         existing_files = get_existing_files_from_dir(save_directory)
     else:
-        raise ValueError(f"Unknown check_type: {check_type}")
+        raise ValueError(f"Unknown check_type: {active_check_type}")
 
     created_dirs_cache = set()
     shared_args = dict(
@@ -450,7 +471,8 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
         ignore_tls_errors=ignore_tls_errors,
     )
 
-    if save_type == "ALL":
+    active_save_type = _get_save_type()
+    if active_save_type == "ALL":
         endpoints = [
             ("submissions", "submission"),
             ("comments", "comment"),
@@ -512,7 +534,7 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
 
         processed_count, skipped_count, total_size, total_media_size = _merge_results(*results)
 
-    elif save_type == "ACTIVITY":
+    elif active_save_type == "ACTIVITY":
         with ThreadPoolExecutor(max_workers=2) as pool:
             r1 = _clone_reddit(reddit)
             r2 = _clone_reddit(reddit)
@@ -543,7 +565,7 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
                 f2.result(),
             )
 
-    elif save_type == "SAVED":
+    elif active_save_type == "SAVED":
         saved_items = _fetch_items(reddit, "saved", 1000, "saved")
         processed_count, skipped_count, total_size, total_media_size = _process_mixed_items(
             saved_items,
@@ -554,7 +576,7 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
             **shared_args,
         )
 
-    elif save_type == "UPVOTED":
+    elif active_save_type == "UPVOTED":
         upvoted_items = _fetch_items(reddit, "upvoted", 1000, "upvoted")
         processed_count, skipped_count, total_size, total_media_size = _process_mixed_items(
             upvoted_items,
@@ -564,7 +586,7 @@ def save_user_activity(reddit, save_directory, file_log, unsave=False):
             **shared_args,
         )
     else:
-        raise ValueError(f"Unknown save_type: {save_type}")
+        raise ValueError(f"Unknown save_type: {active_save_type}")
 
     save_file_log(file_log, save_directory)
     return processed_count, skipped_count, total_size, total_media_size
