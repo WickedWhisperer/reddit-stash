@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       archive_root:
-        description: Archive root directory in the runner workspace
+        description: Archive root directory relative to the GitHub Actions workspace
         required: true
         default: reddit_mega
       quarantine_name:
@@ -17,7 +17,7 @@ on:
         type: boolean
         default: false
       apply:
-        description: Move duplicates instead of just listing them
+        description: Move duplicates into quarantine instead of previewing
         required: false
         type: boolean
         default: false
@@ -39,12 +39,41 @@ jobs:
           mkdir -p scripts
           cp reddit_stash_dedupe_quarantine.py scripts/reddit_stash_dedupe_quarantine.py
 
-      - name: Run duplicate quarantine
+      - name: Resolve archive folder
+        id: resolve
+        shell: bash
         run: |
-          python scripts/reddit_stash_dedupe_quarantine.py "${{ inputs.archive_root }}" --quarantine "${{ inputs.quarantine_name }}" ${{ inputs.keep_oldest && '--keep-oldest' || '' }} ${{ inputs.apply && '--apply' || '' }}
+          set -euo pipefail
+          ROOT="${{ github.workspace }}/${{ inputs.archive_root }}"
+
+          if [ -d "$ROOT" ]; then
+            echo "archive_root=$ROOT" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Try to locate the folder anywhere inside the workspace.
+          FOUND="$(find "${{ github.workspace }}" -type d -name "${{ inputs.archive_root }}" | head -n 1 || true)"
+          if [ -n "$FOUND" ]; then
+            echo "archive_root=$FOUND" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Archive folder not found."
+          echo "Looked for: $ROOT"
+          echo "Workspace contents:"
+          find "${{ github.workspace }}" -maxdepth 3 -mindepth 1 -print | sort
+
+          exit 1
+
+      - name: Run duplicate quarantine
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/reddit_stash_dedupe_quarantine.py "${{ steps.resolve.outputs.archive_root }}" --quarantine "${{ inputs.quarantine_name }}" ${{ inputs.keep_oldest && '--keep-oldest' || '' }} ${{ inputs.apply && '--apply' || '' }}
 
       - name: Upload quarantine folder
+        if: ${{ inputs.apply }}
         uses: actions/upload-artifact@v4
         with:
           name: duplicate-quarantine
-          path: ${{ inputs.archive_root }}/${{ inputs.quarantine_name }}
+          path: ${{ steps.resolve.outputs.archive_root }}/${{ inputs.quarantine_name }}
