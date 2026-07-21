@@ -14,6 +14,7 @@ from praw.models import Comment, Submission
 
 from utils.env_config import get_ignore_tls_errors
 from utils.feature_flags import get_media_config
+from utils.config_paths import get_storage_provider
 from utils.media_services.reddit_media import RedditMediaDownloader
 from utils.praw_helpers import RecoveredItem, create_recovery_metadata_markdown
 from utils.time_utilities import lazy_load_comments
@@ -39,6 +40,51 @@ def extract_video_id(url: str) -> Optional[str]:
     if "youtu.be" in url:
         return url.split("/")[-1]
     return None
+
+
+def _active_storage_provider() -> str:
+    """Return the currently selected storage provider."""
+    try:
+        provider = get_storage_provider()
+        return (provider or "none").strip().lower()
+    except Exception:
+        return "none"
+
+
+def _use_per_item_media_dirs() -> bool:
+    """Dropbox gets per-item media folders; Mega keeps the legacy flat layout."""
+    return _active_storage_provider() == "dropbox"
+
+
+def _resolve_media_save_dir(path: str) -> str:
+    """
+    Resolve a media destination directory based on the active provider.
+
+    Dropbox: store beside each markdown file in its own dedicated folder.
+    Mega: keep the legacy flat structure under the parent subreddit directory.
+
+    Examples:
+      Dropbox: reddit/r_Python/POST_abc123.md -> reddit/r_Python/POST_abc123/
+      Mega:    reddit_mega/r_Python/POST_abc123.md -> reddit_mega/r_Python/
+    """
+    if not path:
+        return path
+
+    if os.path.splitext(path)[1].lower() == ".md":
+        media_dir = os.path.splitext(path)[0] if _use_per_item_media_dirs() else os.path.dirname(path)
+    else:
+        media_dir = path
+
+    if not media_dir:
+        media_dir = "."
+
+    os.makedirs(media_dir, exist_ok=True)
+    return media_dir
+
+
+def _prefixed_media_id(base_id: str, sequence: Optional[int] = None) -> str:
+    """Keep the original media ID unchanged."""
+    return str(base_id).strip()
 
 
 def _resolve_media_save_dir(path: str) -> str:
@@ -369,28 +415,19 @@ def _save_submission_media(
                     or info.get("id")
                     or f"gallery_{idx}"
                 )
-                fid = f"{submission.id}_{gid}"
+                fid = _prefixed_media_id(f"{submission.id}_{gid}", idx)
                 return idx, download_image(info["url"], save_dir, fid, ignore_tls_errors)
 
             results = {}
-            if context_mode:
-                for i, m in enumerate(gallery_images, 1):
-                    idx, (path, size) = _download_gallery_item((i, m))
-                    results[idx] = (path, size)
-                    if not path:
-                        logger.info(
-                            f"Context mode: gallery image {idx} failed, skipping rest"
-                        )
-                        break
-            else:
-                with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                    futures = {
-                        pool.submit(_download_gallery_item, (i, m)): i
-                        for i, m in enumerate(gallery_images, 1)
-                    }
-                    for future in as_completed(futures):
-                        idx, (path, size) = future.result()
-                        results[idx] = (path, size)
+            # Download sequentially so on-disk creation order matches the post order.
+            for i, m in enumerate(gallery_images, 1):
+                idx, (path, size) = _download_gallery_item((i, m))
+                results[idx] = (path, size)
+                if context_mode and not path:
+                    logger.info(
+                        f"Context mode: gallery image {idx} failed, skipping rest"
+                    )
+                    break
 
             for idx in sorted(results):
                 path, size = results[idx]
@@ -471,6 +508,7 @@ def save_submission(
     ignore_tls_errors: Optional[bool] = None,
     recovery_metadata=None,
     context_mode: bool = False,
+    include_media: bool = True,
 ) -> None:
     """Save a submission and its metadata, optionally unsaving it after."""
     try:
@@ -519,19 +557,21 @@ def save_submission(
 
             media_config = get_media_config()
 
-            # Use a per-item directory derived from the markdown filename.
             save_dir = _resolve_media_save_dir(f.name)
 
             try:
-                _save_submission_media(
-                    submission,
-                    f,
-                    is_recovered,
-                    media_config,
-                    save_dir,
-                    ignore_tls_errors,
-                    context_mode,
-                )
+                if include_media:
+                    _save_submission_media(
+                        submission,
+                        f,
+                        is_recovered,
+                        media_config,
+                        save_dir,
+                        ignore_tls_errors,
+                        context_mode,
+                    )
+                else:
+                    f.write("**Media omitted in this context view.**\n")
             except Exception as media_err:
                 if context_mode:
                     logger.info(f"Context mode media fallback for {submission.id}: {media_err}")
@@ -603,7 +643,13 @@ def save_comment_and_context(
                         f.write(f"{parent.selftext}\n\n")
                     f.write(f"[Link to post content]({parent.url})\n\n")
                     f.write("\n\n## Full Post Context:\n\n")
-                    save_submission(parent, f, ignore_tls_errors=ignore_tls_errors, context_mode=True)
+                    save_submission(
+                        parent,
+                        f,
+                        ignore_tls_errors=ignore_tls_errors,
+                        context_mode=True,
+                        include_media=False,
+                    )
 
             elif isinstance(parent, Comment):
                 f.write(f'## Context: Parent Comment by /u/{parent.author.name if parent.author else "[deleted]"}\n')
@@ -656,7 +702,7 @@ def process_comments(
             if potential_url.startswith(("http://", "https://")) and "." in potential_url:
                 image_url = potential_url
 
-        if image_url:
+        if image_url and get_media_config().is_images_enabled():
             body_before_url = comment_body[: comment_body.rfind(image_url)].strip()
             if body_before_url:
                 for line in body_before_url.split("\n"):
