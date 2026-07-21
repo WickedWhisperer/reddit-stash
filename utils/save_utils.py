@@ -87,24 +87,6 @@ def _prefixed_media_id(base_id: str, sequence: Optional[int] = None) -> str:
     return str(base_id).strip()
 
 
-def _resolve_media_save_dir(path: str) -> str:
-    """
-    Save media beside each markdown file in its own dedicated folder.
-
-    Examples:
-      reddit/r_Python/POST_abc123.md -> reddit/r_Python/POST_abc123/
-      reddit/r_Python/COMMENT_xyz789.md -> reddit/r_Python/COMMENT_xyz789/
-    """
-    if not path:
-        return path
-
-    media_dir = os.path.splitext(path)[0]
-    os.makedirs(media_dir, exist_ok=True)
-    return media_dir
-
-
-
-
 def _candidate_media_directories(save_directory: str) -> list[str]:
     """Return directories that may already contain a downloaded media file.
 
@@ -399,6 +381,7 @@ def _save_submission_media(
         and hasattr(submission, "is_gallery")
         and submission.is_gallery
         and media_config.is_albums_enabled()
+        and media_config.is_images_enabled()
     ):
         media_urls = RedditMediaDownloader.extract_media_urls_from_submission(submission)
         gallery_images = [m for m in media_urls if m.get("source") == "reddit_gallery"]
