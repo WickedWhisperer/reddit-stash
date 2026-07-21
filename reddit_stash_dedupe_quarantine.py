@@ -49,6 +49,16 @@ def main() -> int:
         action="store_true",
         help="Keep the oldest file in each duplicate set instead of the first path in sorted order",
     )
+    parser.add_argument(
+        "--manifest",
+        default=None,
+        help=(
+            "Optional path to write a newline-delimited list of quarantined "
+            "files' original relative paths (only written with --apply). "
+            "Lets a caller (e.g. a CI workflow) delete the same files from "
+            "remote storage after quarantining them locally."
+        ),
+    )
     args = parser.parse_args()
 
     root = Path(args.root).expanduser().resolve()
@@ -76,6 +86,7 @@ def main() -> int:
         groups.setdefault(key, []).append(path)
 
     moved = 0
+    quarantined_relative_paths: List[str] = []
     for paths in groups.values():
         if len(paths) < 2:
             continue
@@ -102,11 +113,23 @@ def main() -> int:
             print(f"DUPLICATE: {path} -> {final_dest} | keep: {keeper}")
             if args.apply:
                 path.rename(final_dest)
+                # Record the file's *original* relative path (before it moved
+                # into the quarantine folder) so a caller can delete the same
+                # object from remote storage (e.g. Mega) by that path.
+                quarantined_relative_paths.append(rel.as_posix())
             moved += 1
 
     if args.apply:
         print(f"Moved {moved} duplicate files into {quarantine_root}")
         print("Only exact duplicate files were moved.")
+        if args.manifest:
+            manifest_path = Path(args.manifest).expanduser()
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(
+                "\n".join(quarantined_relative_paths) + ("\n" if quarantined_relative_paths else ""),
+                encoding="utf-8",
+            )
+            print(f"Wrote manifest of {len(quarantined_relative_paths)} quarantined path(s) to {manifest_path}")
     else:
         print(f"Dry run complete. {moved} duplicate files would be moved into {quarantine_root}.")
         print("No files were changed.")
