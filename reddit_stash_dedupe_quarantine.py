@@ -7,12 +7,14 @@ from typing import Dict, List, Tuple
 
 CHUNK_SIZE = 1024 * 1024
 
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(CHUNK_SIZE), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
 
 def is_within_quarantine(path: Path, quarantine_root: Path) -> bool:
     try:
@@ -21,11 +23,17 @@ def is_within_quarantine(path: Path, quarantine_root: Path) -> bool:
     except Exception:
         return False
 
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Move exact duplicate files into a quarantine folder for manual inspection."
     )
-    parser.add_argument("root", help="Archive root directory to scan")
+    parser.add_argument(
+        "root",
+        nargs="?",
+        default="reddit",
+        help="Archive root directory to scan",
+    )
     parser.add_argument(
         "--quarantine",
         default="_duplicates_quarantine",
@@ -34,7 +42,7 @@ def main() -> int:
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="Actually move duplicates into quarantine (otherwise dry run)",
+        help="Actually move duplicates into quarantine",
     )
     parser.add_argument(
         "--keep-oldest",
@@ -102,7 +110,9 @@ def main() -> int:
     else:
         print(f"Dry run complete. {moved} duplicate files would be moved into {quarantine_root}.")
         print("No files were changed.")
+
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
