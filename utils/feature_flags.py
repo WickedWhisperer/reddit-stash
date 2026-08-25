@@ -1,188 +1,137 @@
 from __future__ import annotations
 
 import configparser
+import logging
 import os
+import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from .config_paths import get_settings_file_path
 
-def get_settings_file_path() -> str:
-    """
-    Return the active settings file.
-
-    The workflow can set SETTINGS_FILE to switch configs, but plain
-    local runs still fall back to settings.ini in the repository root.
-    """
-    settings_file = os.getenv("SETTINGS_FILE", "settings.ini")
-
-    if os.path.isabs(settings_file):
-        return settings_file
-
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base_dir, settings_file)
+logger = logging.getLogger(__name__)
 
 
-def _load_config() -> configparser.ConfigParser:
-    parser = configparser.ConfigParser()
-    parser.read(get_settings_file_path())
-    return parser
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-@dataclass
+@dataclass(frozen=True)
 class MediaConfig:
-    parser: configparser.ConfigParser
+    enabled: bool = True
+    images: bool = True
+    gifs: bool = False
+    videos: bool = True
+    audio: bool = True
+    albums: bool = True
+    video_quality: str = "high"
+    max_image_size: int = 50 * 1024 * 1024
+    max_video_size: int = 2 * 1024 * 1024 * 1024
+    max_album_images: int = 50
+    max_concurrent_downloads: int = 4
+    download_timeout: int = 120
 
     def is_media_enabled(self) -> bool:
-        return self.parser.getboolean("Media", "download_enabled", fallback=False)
+        return self.enabled
 
     def is_images_enabled(self) -> bool:
-        return self.is_media_enabled() and self.parser.getboolean(
-            "Media", "download_images", fallback=True
-        )
+        return self.enabled and self.images
 
     def is_gifs_enabled(self) -> bool:
-        return self.is_media_enabled() and self.parser.getboolean(
-            "Media", "download_gifs", fallback=True
-        )
+        return self.enabled and self.gifs
 
     def is_videos_enabled(self) -> bool:
-        return self.is_media_enabled() and self.parser.getboolean(
-            "Media", "download_videos", fallback=True
-        )
+        return self.enabled and self.videos
 
     def is_audio_enabled(self) -> bool:
-        return self.is_media_enabled() and self.parser.getboolean(
-            "Media", "download_audio", fallback=True
-        )
+        return self.enabled and self.audio
 
     def is_albums_enabled(self) -> bool:
-        return self.is_media_enabled() and self.parser.getboolean(
-            "Media", "download_albums", fallback=True
+        return self.enabled and self.albums
+
+
+class FeatureFlags:
+    def __init__(self, settings_path: Optional[str] = None):
+        self.settings_path = settings_path or str(get_settings_file_path())
+        self._config = self._load_config(self.settings_path)
+
+    @staticmethod
+    def _load_config(path: str) -> configparser.ConfigParser:
+        parser = configparser.ConfigParser()
+        parser.read(path)
+        return parser
+
+    def get_media_config(self) -> MediaConfig:
+        section = self._config["Media"] if self._config.has_section("Media") else {}
+
+        def get_bool(key: str, default: bool) -> bool:
+            value = section.get(key, str(default))
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+
+        def get_int(key: str, default: int) -> int:
+            try:
+                return int(section.get(key, str(default)))
+            except (TypeError, ValueError):
+                return default
+
+        return MediaConfig(
+            enabled=get_bool("download_enabled", True),
+            images=get_bool("download_images", True),
+            gifs=get_bool("download_gifs", False),
+            videos=get_bool("download_videos", True),
+            audio=get_bool("download_audio", True),
+            albums=get_bool("download_albums", True),
+            video_quality=section.get("video_quality", "high").strip().lower(),
+            max_image_size=get_int("max_image_size", 50 * 1024 * 1024),
+            max_video_size=get_int("max_video_size", 2 * 1024 * 1024 * 1024),
+            max_album_images=get_int("max_album_images", 50),
+            max_concurrent_downloads=get_int("max_concurrent_downloads", 4),
+            download_timeout=get_int("download_timeout", 120),
         )
 
-    def is_thumbnails_enabled(self) -> bool:
-        return self.is_media_enabled() and self.parser.getboolean(
-            "Media", "create_thumbnails", fallback=True
-        )
+    def is_feature_enabled(self, feature_name: str, default: bool = False) -> bool:
+        section = self._config["Features"] if self._config.has_section("Features") else {}
+        value = section.get(feature_name, str(default))
+        return value.strip().lower() in {"1", "true", "yes", "on"}
 
-    def max_image_size(self) -> int:
-        return self.parser.getint("Media", "max_image_size", fallback=5 * 1024 * 1024)
-
-    def max_video_size(self) -> int:
-        return self.parser.getint("Media", "max_video_size", fallback=200 * 1024 * 1024)
-
-    def max_album_images(self) -> int:
-        return self.parser.getint("Media", "max_album_images", fallback=50)
-
-    def max_concurrent_downloads(self) -> int:
-        return self.parser.getint("Media", "max_concurrent_downloads", fallback=3)
-
-    def download_timeout(self) -> int:
-        return self.parser.getint("Media", "download_timeout", fallback=30)
-
-    def max_daily_storage_mb(self) -> int:
-        return self.parser.getint("Media", "max_daily_storage_mb", fallback=1024)
-
-    def get_summary(self) -> str:
-        if not self.is_media_enabled():
-            return "Media downloads: DISABLED"
-
-        features = []
-        if self.is_images_enabled():
-            features.append("images")
-        if self.is_gifs_enabled():
-            features.append("gifs")
-        if self.is_videos_enabled():
-            features.append("videos")
-        if self.is_audio_enabled():
-            features.append("audio")
-        if self.is_albums_enabled():
-            features.append("albums")
-        if self.is_thumbnails_enabled():
-            features.append("thumbnails")
-
-        return f"Media downloads: ENABLED ({', '.join(features)})"
+    def reload(self) -> None:
+        self.settings_path = str(get_settings_file_path())
+        self._config = self._load_config(self.settings_path)
 
 
-@dataclass
-class StorageConfig:
-    provider: str = "none"
-    dropbox_directory: str = "/reddit"
-    s3_bucket: Optional[str] = None
-    s3_region: Optional[str] = None
-    s3_storage_class: str = "STANDARD_IA"
-    s3_endpoint_url: Optional[str] = None
+_instance: Optional[FeatureFlags] = None
+_lock = threading.Lock()
+
+
+def get_feature_flags() -> FeatureFlags:
+    global _instance
+    with _lock:
+        current_path = str(get_settings_file_path())
+        if _instance is None or _instance.settings_path != current_path:
+            _instance = FeatureFlags(current_path)
+    return _instance
 
 
 def get_media_config() -> MediaConfig:
-    return MediaConfig(_load_config())
+    return get_feature_flags().get_media_config()
 
 
-def get_storage_config() -> StorageConfig:
-    parser = _load_config()
-
-    provider = parser.get("Storage", "provider", fallback="none").strip().lower()
-    dropbox_directory = parser.get("Settings", "dropbox_directory", fallback="/reddit")
-    s3_bucket = parser.get("Storage", "s3_bucket", fallback=None)
-    s3_region = parser.get("Storage", "s3_region", fallback=None)
-    s3_storage_class = parser.get("Storage", "s3_storage_class", fallback="STANDARD_IA")
-    s3_endpoint_url = parser.get("Storage", "s3_endpoint_url", fallback=None)
-
-    return StorageConfig(
-        provider=provider,
-        dropbox_directory=dropbox_directory,
-        s3_bucket=s3_bucket if s3_bucket and s3_bucket.lower() != "none" else None,
-        s3_region=s3_region if s3_region and s3_region.lower() != "none" else None,
-        s3_storage_class=s3_storage_class,
-        s3_endpoint_url=s3_endpoint_url if s3_endpoint_url and s3_endpoint_url.lower() != "none" else None,
-    )
+def is_feature_enabled(feature_name: str, default: bool = False) -> bool:
+    return get_feature_flags().is_feature_enabled(feature_name, default)
 
 
-def validate_media_config() -> Optional[str]:
-    """
-    Return an error string if the media section is invalid, otherwise None.
-    """
-    parser = _load_config()
-
-    if not parser.has_section("Media"):
-        return "Missing [Media] section"
-
-    try:
-        enabled = parser.getboolean("Media", "download_enabled", fallback=False)
-        images = parser.getboolean("Media", "download_images", fallback=False)
-        gifs = parser.getboolean("Media", "download_gifs", fallback=False)
-        videos = parser.getboolean("Media", "download_videos", fallback=False)
-        audio = parser.getboolean("Media", "download_audio", fallback=False)
-        albums = parser.getboolean("Media", "download_albums", fallback=False)
-        thumbnails = parser.getboolean("Media", "create_thumbnails", fallback=False)
-
-        if enabled and not any([images, gifs, videos, audio, albums, thumbnails]):
-            return "Media is enabled but all media features are disabled"
-
-        for key in ("max_image_size", "max_video_size", "max_album_images", "max_concurrent_downloads", "download_timeout", "max_daily_storage_mb"):
-            value = parser.getint("Media", key, fallback=1)
-            if value <= 0:
-                return f"{key} must be a positive integer"
-
-    except ValueError as exc:
-        return f"Invalid media configuration value: {exc}"
-
-    return None
+def reload_features() -> None:
+    get_feature_flags().reload()
 
 
-def get_storage_summary() -> str:
-    config = get_storage_config()
-
-    if config.provider == "dropbox":
-        return f"Cloud storage: Dropbox ({config.dropbox_directory})"
-    if config.provider == "s3":
-        bucket = config.s3_bucket or "unset"
-        return f"Cloud storage: S3 (s3://{bucket}, class={config.s3_storage_class})"
-
-    return "Cloud storage: disabled"
-
-
-def get_feature_summary() -> str:
-    media = get_media_config()
-    parts = [media.get_summary(), get_storage_summary()]
-    return "\n".join(parts)
+__all__ = [
+    "FeatureFlags",
+    "MediaConfig",
+    "get_feature_flags",
+    "get_media_config",
+    "is_feature_enabled",
+    "reload_features",
+]
