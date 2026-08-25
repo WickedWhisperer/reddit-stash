@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-"""MEGA storage backend implemented via rclone.
+"""Reliable MEGA storage backend for Reddit Stash.
 
-This provider is used by storage_utils.py. In LOG mode it downloads file_log.json,
-and when GDPR processing is enabled it also downloads the gdpr_data/ folder so the
-GDPR processor can run in the workflow runner.
+MEGA (through rclone) does not expose hashes or modification times and can
+contain duplicate files with the same path.  Therefore this provider does
+not rely on rclone's normal destination comparison for archive correctness.
+Instead it keeps a small remote content manifest and replaces files through a
+staging path so a failed upload cannot create a new committed file_log.json.
 """
 
 import configparser
@@ -12,44 +14,49 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import time
-from typing import List, Optional
+import uuid
+from pathlib import Path
+from typing import Dict, List, Optional
 
 from utils.config_paths import get_settings_file_path
+from utils.storage.content_hash import compute_file_hash
 from .base import StorageFileInfo, StorageProviderProtocol, SyncResult
 
 
 class MegaStorageProvider(StorageProviderProtocol):
-    """MEGA implementation backed by rclone."""
+    """MEGA implementation backed by rclone with archive-safe replacement."""
 
     LEGACY_LOG_NAME = "log.json"
     CANONICAL_LOG_NAME = "file_log.json"
+    MANIFEST_NAME = "media_manifest.json"
+    STAGING_DIR = ".reddit-stash-staging"
 
     def __init__(self, mega_remote: str = "mega"):
         self._mega_remote = mega_remote
         self._connected = False
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # rclone / path helpers
     # ------------------------------------------------------------------
     def _require_rclone(self) -> None:
         if shutil.which("rclone") is None:
             raise RuntimeError(
-                "rclone is not installed.\n"
-                "Install it before using the MEGA storage provider."
+                "rclone is not installed. Install rclone before using the MEGA provider."
             )
 
     def _remote_prefix(self, remote_directory: str = "") -> str:
-        directory = (remote_directory or "").strip().lstrip("/")
-        if directory:
-            return f"{self._mega_remote}:{directory}"
-        return f"{self._mega_remote}:"
+        directory = (remote_directory or "").strip().strip("/")
+        return f"{self._mega_remote}:{directory}" if directory else f"{self._mega_remote}:"
 
     def _remote_join(self, remote_directory: str, filename: str) -> str:
-        remote_spec = self._remote_prefix(remote_directory)
-        if remote_spec.endswith(":"):
-            return f"{remote_spec}{filename}"
-        return f"{remote_spec}/{filename}"
+        prefix = self._remote_prefix(remote_directory)
+        return f"{prefix}{filename}" if prefix.endswith(":") else f"{prefix}/{filename}"
+
+    @staticmethod
+    def _norm_rel(path: str) -> str:
+        return str(path).replace(os.sep, "/").strip("/")
 
     def _run(self, args: list[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
         self._require_rclone()
@@ -69,65 +76,214 @@ class MegaStorageProvider(StorageProviderProtocol):
 
         email = os.getenv("MEGA_EMAIL")
         password = os.getenv("MEGA_PASSWORD")
+        twofa = os.getenv("MEGA_2FA")
         if not email or not password:
             raise RuntimeError(
-                "MEGA remote is not configured.\n"
-                "Set MEGA_EMAIL and MEGA_PASSWORD, "
-                "or create the rclone remote manually."
+                "MEGA remote is not configured. Set MEGA_EMAIL and MEGA_PASSWORD, "
+                "or create an rclone remote named 'mega'."
             )
 
-        self._run(
-            [
-                "config",
-                "create",
-                self._mega_remote,
-                "mega",
-                "user",
-                email,
-                "pass",
-                password,
-                "--non-interactive",
-            ],
-            check=True,
-        )
+        args = [
+            "config", "create", self._mega_remote, "mega",
+            "user", email, "pass", password,
+            "--non-interactive",
+        ]
+        if twofa:
+            args.extend(["2fa", twofa])
+        self._run(args, check=True)
 
-    def _sync_result(
-        self,
-        *,
-        uploaded: int = 0,
-        downloaded: int = 0,
-        skipped: int = 0,
-        failed: int = 0,
-        bytes_transferred: int = 0,
-        start: float = 0.0,
-        errors=None,
-    ) -> SyncResult:
-        return SyncResult(
-            uploaded=uploaded,
-            downloaded=downloaded,
-            skipped=skipped,
-            failed=failed,
-            bytes_transferred=bytes_transferred,
-            elapsed_seconds=time.time() - start if start else 0.0,
-            errors=errors or [],
-        )
+    def connect(self) -> None:
+        self._ensure_remote_configured()
+        self._connected = True
 
-    def _delete_remote_file(self, remote_path: str) -> None:
-        proc = self._run(["deletefile", remote_path])
-        if proc.returncode != 0:
-            stderr = (proc.stderr or proc.stdout or "").lower()
-            if "not found" in stderr or "does not exist" in stderr:
-                return
-            raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "MEGA delete failed")
+    def get_provider_name(self) -> str:
+        return "MEGA"
 
-    def _cleanup_legacy_log_files(self, remote_directory: str) -> None:
-        """Remove any old log.json files from the remote archive before upload."""
-        for item in self.list_files(remote_directory):
-            basename = os.path.basename(item.remote_path)
-            if basename != self.LEGACY_LOG_NAME:
+    # ------------------------------------------------------------------
+    # Manifest helpers
+    # ------------------------------------------------------------------
+    def _load_remote_manifest(self, remote_directory: str) -> Dict[str, dict]:
+        remote_path = self._remote_join(remote_directory, self.MANIFEST_NAME)
+        with tempfile.TemporaryDirectory(prefix="reddit-stash-mega-manifest-") as tmp:
+            local = os.path.join(tmp, self.MANIFEST_NAME)
+            proc = self._run(["copyto", remote_path, local])
+            if proc.returncode != 0:
+                text = (proc.stderr or proc.stdout or "").lower()
+                if "not found" in text or "does not exist" in text:
+                    return {}
+                raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "Failed to read MEGA manifest")
+            try:
+                with open(local, "r", encoding="utf-8") as fh:
+                    payload = json.load(fh)
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError(f"Invalid MEGA {self.MANIFEST_NAME}: {exc}") from exc
+        files = payload.get("files", {}) if isinstance(payload, dict) else {}
+        return files if isinstance(files, dict) else {}
+
+    def _write_manifest(self, local_directory: str) -> str:
+        payload = {
+            "version": 1,
+            "algorithm": "blake3-or-sha256",
+            "files": {},
+        }
+        root = Path(local_directory)
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
                 continue
-            self._delete_remote_file(self._remote_join(os.path.dirname(item.remote_path), basename))
+            rel = self._norm_rel(str(path.relative_to(root)))
+            if rel in {self.CANONICAL_LOG_NAME, self.LEGACY_LOG_NAME, self.MANIFEST_NAME}:
+                continue
+            if rel.startswith(self.STAGING_DIR + "/"):
+                continue
+            payload["files"][rel] = {
+                "hash": compute_file_hash(str(path)),
+                "size": path.stat().st_size,
+            }
 
+        fd, temp_path = tempfile.mkstemp(prefix="reddit-stash-manifest-", suffix=".json")
+        os.close(fd)
+        with open(temp_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+            fh.write("\n")
+        return temp_path
+
+    # ------------------------------------------------------------------
+    # Remote listing / duplicate-safe replacement
+    # ------------------------------------------------------------------
+    def list_files(self, remote_directory: str) -> List[StorageFileInfo]:
+        remote_spec = self._remote_prefix(remote_directory)
+        proc = self._run(["lsjson", remote_spec, "--recursive"])
+        if proc.returncode != 0:
+            return []
+        try:
+            entries = json.loads(proc.stdout or "[]")
+        except json.JSONDecodeError:
+            return []
+
+        prefix = self._norm_rel(remote_directory)
+        files: List[StorageFileInfo] = []
+        for entry in entries:
+            if entry.get("IsDir"):
+                continue
+            rel_path = entry.get("Path") or entry.get("Name") or ""
+            rel_path = self._norm_rel(rel_path)
+            if not rel_path:
+                continue
+            remote_path = f"{prefix}/{rel_path}" if prefix else rel_path
+            files.append(
+                StorageFileInfo(
+                    remote_path=remote_path,
+                    content_hash=None,
+                    size_bytes=int(entry.get("Size") or 0),
+                    last_modified=entry.get("ModTime"),
+                )
+            )
+        return files
+
+    def _remote_matches(self, remote_directory: str, relative_path: str) -> List[StorageFileInfo]:
+        """Return all remote nodes matching one exact relative path under a directory."""
+        prefix = self._norm_rel(remote_directory)
+        target = self._norm_rel(relative_path)
+        expected = f"{prefix}/{target}" if prefix else target
+        return [
+            item for item in self.list_files(remote_directory)
+            if self._norm_rel(item.remote_path) == expected
+        ]
+
+    def _delete_known_matches(self, remote_directory: str, relative_path: str, count: int) -> None:
+        """Delete a known number of duplicate MEGA nodes without rescanning the remote."""
+        if count <= 0:
+            return
+        target = self._remote_join(remote_directory, self._norm_rel(relative_path))
+        for _ in range(count):
+            proc = self._run(["deletefile", target])
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    proc.stderr.strip() or proc.stdout.strip() or
+                    f"Failed deleting MEGA {target}"
+                )
+
+    def _cleanup_staging(self, remote_directory: str) -> None:
+        staging_directory = f"{self._norm_rel(remote_directory)}/{self.STAGING_DIR}".strip("/")
+        for item in self.list_files(staging_directory):
+            proc = self._run(["deletefile", self._remote_join("", self._norm_rel(item.remote_path))])
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    proc.stderr.strip() or proc.stdout.strip() or
+                    f"Failed cleaning MEGA staging file {item.remote_path}"
+                )
+
+    def _stage_and_replace(
+        self,
+        local_path: str,
+        remote_directory: str,
+        relative_path: str,
+        existing_count: int | None = None,
+    ) -> int:
+        """Upload to a unique staging path, then replace all final-path nodes."""
+        rel = self._norm_rel(relative_path)
+        root = self._norm_rel(remote_directory)
+        token = uuid.uuid4().hex
+        stage_rel = f"{self.STAGING_DIR}/{token}/{rel}"
+        stage_target = self._remote_join(root, stage_rel)
+        final_target = self._remote_join(root, rel)
+        size = os.path.getsize(local_path)
+
+        proc = self._run(["copyto", local_path, stage_target, "--progress"])
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or f"MEGA staging upload failed: {rel}")
+
+        # rclone verifies the completed transfer before returning success.  The staged
+        # copy is therefore safe to use as the replacement before old nodes are removed.
+        if existing_count is None:
+            existing_count = len(self._remote_matches(root, rel))
+
+        # Delete all old copies only after the new copy exists remotely.
+        self._delete_known_matches(root, rel, existing_count)
+
+        proc = self._run(["moveto", stage_target, final_target, "--progress"])
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or f"MEGA final move failed: {rel}")
+
+        # Do not rescan the whole remote after every transfer.  moveto success means the
+        # staged object was moved to the requested destination; the next directory listing
+        # will verify uniqueness and size when the provider runs again.
+        return size
+
+    def upload_file(self, local_path: str, remote_path: str) -> StorageFileInfo:
+        self.connect()
+        normalized = self._norm_rel(remote_path)
+        remote_root = self._norm_rel(os.path.dirname(normalized))
+        relative = os.path.basename(normalized)
+        existing_count = len(self._remote_matches(remote_root, relative))
+        size = self._stage_and_replace(local_path, remote_root, relative, existing_count=existing_count)
+        return StorageFileInfo(remote_path=normalized, size_bytes=size)
+
+    def download_file(self, remote_path: str, local_path: str) -> StorageFileInfo:
+        self.connect()
+        source = self._remote_join("", self._norm_rel(remote_path))
+        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+        proc = self._run(["copyto", source, local_path, "--progress"])
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "MEGA download failed")
+        size = os.path.getsize(local_path)
+        return StorageFileInfo(remote_path=self._norm_rel(remote_path), size_bytes=size)
+
+    def get_file_info(self, remote_path: str) -> Optional[StorageFileInfo]:
+        normalized = self._norm_rel(remote_path)
+        parent = os.path.dirname(normalized)
+        basename = os.path.basename(normalized)
+        for item in self.list_files(parent):
+            if self._norm_rel(item.remote_path) == normalized:
+                return item
+        return None
+
+    def file_exists(self, remote_path: str) -> bool:
+        return self.get_file_info(remote_path) is not None
+
+    # ------------------------------------------------------------------
+    # LOG-mode helpers
+    # ------------------------------------------------------------------
     def _read_bool_from_settings(self, section: str, key: str, fallback: bool = False) -> bool:
         parser = configparser.ConfigParser()
         parser.read(get_settings_file_path())
@@ -142,249 +298,251 @@ class MegaStorageProvider(StorageProviderProtocol):
         return self._read_bool_from_settings("Settings", "process_gdpr", fallback=False)
 
     def _download_log_only(self, remote_directory: str, local_directory: str, start: float) -> SyncResult:
-        """Download only file_log.json, with a legacy fallback to log.json."""
         os.makedirs(local_directory, exist_ok=True)
         local_file = os.path.join(local_directory, self.CANONICAL_LOG_NAME)
-
-        for candidate_name in (self.CANONICAL_LOG_NAME, self.LEGACY_LOG_NAME):
-            remote_file = self._remote_join(remote_directory, candidate_name)
-            proc = self._run(["copyto", remote_file, local_file, "--progress"])
-            if proc.returncode == 0:
-                size_bytes = os.path.getsize(local_file) if os.path.exists(local_file) else 0
-                print(f"Log file downloaded to {local_file}.")
-                return self._sync_result(
-                    downloaded=1,
-                    start=start,
-                    bytes_transferred=size_bytes,
+        for candidate in (self.CANONICAL_LOG_NAME, self.LEGACY_LOG_NAME):
+            matches = self._remote_matches(remote_directory, candidate)
+            if len(matches) > 1:
+                return SyncResult(
+                    failed=1,
+                    elapsed_seconds=time.time() - start,
+                    errors=[
+                        f"MEGA contains {len(matches)} copies of {candidate} at "
+                        f"{self._remote_join(remote_directory, candidate)}; clean duplicates before continuing."
+                    ],
                 )
-
-            stderr = (proc.stderr or proc.stdout or "").lower()
-            if "not found" in stderr or "does not exist" in stderr:
+            source = self._remote_join(remote_directory, candidate)
+            proc = self._run(["copyto", source, local_file, "--progress"])
+            if proc.returncode == 0:
+                size = os.path.getsize(local_file)
+                return SyncResult(downloaded=1, bytes_transferred=size, elapsed_seconds=time.time() - start)
+            text = (proc.stderr or proc.stdout or "").lower()
+            if "not found" in text or "does not exist" in text:
                 continue
-
-            return self._sync_result(
+            return SyncResult(
                 failed=1,
-                start=start,
+                elapsed_seconds=time.time() - start,
                 errors=[proc.stderr.strip() or proc.stdout.strip() or "MEGA log download failed"],
             )
-
         print("No existing log file in MEGA — starting fresh.")
-        return self._sync_result(start=start)
+        return SyncResult(elapsed_seconds=time.time() - start)
 
     def _download_gdpr_data(self, remote_directory: str, local_directory: str) -> SyncResult:
-        """Download gdpr_data/ into the local save directory."""
         start = time.time()
-        gdpr_remote = f"{remote_directory.strip().strip('/')}/gdpr_data".strip("/")
-        gdpr_local = os.path.join(local_directory, "gdpr_data")
-
-        if not gdpr_remote:
-            return self._sync_result(start=start)
-
-        # Only attempt the copy if the export folder looks present.
-        if not self.list_files(gdpr_remote):
-            return self._sync_result(start=start)
-
-        os.makedirs(gdpr_local, exist_ok=True)
-        proc = self._run(
-            [
-                "copy",
-                self._remote_prefix(gdpr_remote),
-                gdpr_local,
-                "--size-only",
-                "--transfers",
-                "2",
-                "--checkers",
-                "4",
-                "--low-level-retries",
-                "20",
-                "--retries",
-                "10",
-                "--progress",
-            ]
-        )
-
+        remote = f"{self._norm_rel(remote_directory)}/gdpr_data".strip("/")
+        if not self.list_files(remote):
+            return SyncResult(elapsed_seconds=time.time() - start)
+        local = os.path.join(local_directory, "gdpr_data")
+        os.makedirs(local, exist_ok=True)
+        proc = self._run([
+            "copy", self._remote_prefix(remote), local,
+            "--transfers", "2", "--checkers", "4",
+            "--low-level-retries", "20", "--retries", "10", "--progress",
+        ])
         if proc.returncode != 0:
-            stderr = proc.stderr.strip() or proc.stdout.strip() or "MEGA GDPR download failed"
-            if "not found" in stderr.lower() or "does not exist" in stderr.lower():
-                return self._sync_result(start=start)
-            return self._sync_result(failed=1, start=start, errors=[stderr])
-
-        return self._sync_result(downloaded=1, start=start)
-
-    # ------------------------------------------------------------------
-    # Protocol methods
-    # ------------------------------------------------------------------
-    def connect(self) -> None:
-        self._ensure_remote_configured()
-        self._connected = True
-
-    def get_provider_name(self) -> str:
-        return "MEGA"
-
-    def upload_file(self, local_path: str, remote_path: str) -> StorageFileInfo:
-        self._ensure_remote_configured()
-        remote_spec = self._remote_prefix(os.path.dirname(remote_path))
-        remote_file_name = os.path.basename(remote_path)
-        target = (
-            f"{remote_spec}/{remote_file_name}"
-            if not remote_spec.endswith(":")
-            else f"{remote_spec}{remote_file_name}"
-        )
-        proc = self._run(["copyto", local_path, target, "--progress"])
-        if proc.returncode != 0:
-            raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "MEGA upload failed")
-        size_bytes = os.path.getsize(local_path)
-        return StorageFileInfo(
-            remote_path=remote_path,
-            content_hash=None,
-            size_bytes=size_bytes,
-            last_modified=None,
-        )
-
-    def download_file(self, remote_path: str, local_path: str) -> StorageFileInfo:
-        self._ensure_remote_configured()
-        remote_spec = self._remote_prefix(os.path.dirname(remote_path))
-        remote_file_name = os.path.basename(remote_path)
-        source = (
-            f"{remote_spec}/{remote_file_name}"
-            if not remote_spec.endswith(":")
-            else f"{remote_spec}{remote_file_name}"
-        )
-        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
-        proc = self._run(["copyto", source, local_path, "--progress"])
-        if proc.returncode != 0:
-            raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "MEGA download failed")
-        size_bytes = os.path.getsize(local_path)
-        return StorageFileInfo(
-            remote_path=remote_path,
-            content_hash=None,
-            size_bytes=size_bytes,
-            last_modified=None,
-        )
-
-    def list_files(self, remote_directory: str) -> List[StorageFileInfo]:
-        remote_spec = self._remote_prefix(remote_directory)
-        proc = self._run(["lsjson", remote_spec, "--recursive"])
-        if proc.returncode != 0:
-            return []
-
-        try:
-            entries = json.loads(proc.stdout or "[]")
-        except json.JSONDecodeError:
-            return []
-
-        files: List[StorageFileInfo] = []
-        prefix = remote_directory.strip("/")
-
-        for entry in entries:
-            if entry.get("IsDir"):
-                continue
-
-            rel_path = entry.get("Path") or entry.get("Name") or ""
-            if not rel_path:
-                continue
-
-            if prefix:
-                remote_path = f"{prefix}/{rel_path}".lstrip("/")
-            else:
-                remote_path = rel_path.lstrip("/")
-
-            files.append(
-                StorageFileInfo(
-                    remote_path=remote_path,
-                    content_hash=None,
-                    size_bytes=int(entry.get("Size") or 0),
-                    last_modified=entry.get("ModTime"),
-                )
+            return SyncResult(
+                failed=1,
+                elapsed_seconds=time.time() - start,
+                errors=[proc.stderr.strip() or proc.stdout.strip() or "MEGA GDPR download failed"],
             )
+        return SyncResult(downloaded=1, elapsed_seconds=time.time() - start)
 
-        return files
+    # ------------------------------------------------------------------
+    # Directory upload / download
+    # ------------------------------------------------------------------
+    def _collect_local_files(self, local_directory: str) -> List[Path]:
+        root = Path(local_directory)
+        files = []
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = self._norm_rel(str(path.relative_to(root)))
+            if rel in {self.CANONICAL_LOG_NAME, self.LEGACY_LOG_NAME, self.MANIFEST_NAME}:
+                continue
+            if rel.startswith(self.STAGING_DIR + "/") or path.name.startswith("."):
+                continue
+            files.append(path)
+        return sorted(files, key=lambda p: self._norm_rel(str(p.relative_to(root))))
 
-    def get_file_info(self, remote_path: str) -> Optional[StorageFileInfo]:
-        remote_path = remote_path.strip("/")
-        if not remote_path:
-            return None
-
-        directory = os.path.dirname(remote_path)
-        basename = os.path.basename(remote_path)
-        for item in self.list_files(directory):
-            if os.path.basename(item.remote_path) == basename:
-                return item
-        return None
-
-    def file_exists(self, remote_path: str) -> bool:
-        return self.get_file_info(remote_path) is not None
+    def _result(self, start: float, **kwargs) -> SyncResult:
+        return SyncResult(elapsed_seconds=time.time() - start, **kwargs)
 
     def upload_directory(self, local_directory: str, remote_directory: str, check_type: str = "DIR") -> SyncResult:
         self.connect()
         start = time.time()
-        remote_spec = self._remote_prefix(remote_directory)
+        errors: List[str] = []
+        uploaded = skipped = failed = 0
+        bytes_transferred = 0
 
-        # Remove stale legacy logs before syncing so only file_log.json remains.
-        self._cleanup_legacy_log_files(remote_directory)
+        try:
+            remote_prefix = self._norm_rel(remote_directory)
+            self._cleanup_staging(remote_directory)
+            manifest = self._load_remote_manifest(remote_directory)
+            remote_entries = self.list_files(remote_directory)
+            remote_by_path: Dict[str, List[StorageFileInfo]] = {}
+            for info in remote_entries:
+                remote_by_path.setdefault(self._norm_rel(info.remote_path), []).append(info)
 
-        proc = self._run(
-            [
-                "copy",
-                local_directory,
-                remote_spec,
-                "--size-only",
-                "--transfers",
-                "2",
-                "--checkers",
-                "4",
-                "--low-level-retries",
-                "20",
-                "--retries",
-                "10",
-                "--progress",
-            ]
+            files = self._collect_local_files(local_directory)
+            for path in files:
+                rel = self._norm_rel(str(path.relative_to(local_directory)))
+                remote_rel = f"{remote_prefix}/{rel}" if remote_prefix else rel
+                digest = compute_file_hash(str(path))
+                size = path.stat().st_size
+                recorded = manifest.get(rel)
+                existing = remote_by_path.get(remote_rel, [])
+
+                if (
+                    isinstance(recorded, dict)
+                    and recorded.get("hash") == digest
+                    and int(recorded.get("size") or -1) == size
+                    and len(existing) == 1
+                    and existing[0].size_bytes == size
+                ):
+                    skipped += 1
+                    continue
+
+                try:
+                    transferred = self._stage_and_replace(
+                        str(path), remote_directory, rel, existing_count=len(existing)
+                    )
+                    uploaded += 1
+                    bytes_transferred += transferred
+                    remote_by_path[remote_rel] = [StorageFileInfo(remote_path=remote_rel, size_bytes=size)]
+                except Exception as exc:
+                    failed += 1
+                    errors.append(f"{rel}: {exc}")
+                    break
+
+            if not errors:
+                manifest_path = self._write_manifest(local_directory)
+                try:
+                    manifest_existing = len(remote_by_path.get(
+                        f"{remote_prefix}/{self.MANIFEST_NAME}" if remote_prefix else self.MANIFEST_NAME, []
+                    ))
+                    transferred = self._stage_and_replace(
+                        manifest_path, remote_directory, self.MANIFEST_NAME, existing_count=manifest_existing
+                    )
+                    uploaded += 1
+                    bytes_transferred += transferred
+                finally:
+                    try:
+                        os.unlink(manifest_path)
+                    except OSError:
+                        pass
+
+                local_log = os.path.join(local_directory, self.CANONICAL_LOG_NAME)
+                if os.path.exists(local_log):
+                    log_existing = len(remote_by_path.get(
+                        f"{remote_prefix}/{self.CANONICAL_LOG_NAME}" if remote_prefix else self.CANONICAL_LOG_NAME, []
+                    ))
+                    transferred = self._stage_and_replace(
+                        local_log, remote_directory, self.CANONICAL_LOG_NAME, existing_count=log_existing
+                    )
+                    uploaded += 1
+                    bytes_transferred += transferred
+
+                legacy_existing = len(remote_by_path.get(
+                    f"{remote_prefix}/{self.LEGACY_LOG_NAME}" if remote_prefix else self.LEGACY_LOG_NAME}" if remote_prefix else self.LEGACY_LOG_NAME, []
+                ))
+                self._delete_known_matches(remote_directory, self.LEGACY_LOG_NAME, legacy_existing)
+                self._run(["rmdirs", f"{self._remote_prefix(remote_directory)}/{self.STAGING_DIR}"], check=False)
+
+        except Exception as exc:
+            failed += 1
+            errors.append(str(exc))
+
+        result = self._result(
+            start,
+            uploaded=uploaded,
+            skipped=skipped,
+            failed=failed,
+            bytes_transferred=bytes_transferred,
+            errors=errors,
         )
-
-        if proc.returncode != 0:
-            stderr = proc.stderr.strip() or proc.stdout.strip() or "MEGA upload failed"
-            return self._sync_result(failed=1, start=start, errors=[stderr])
-
-        return self._sync_result(uploaded=1, start=start, bytes_transferred=0)
+        print(f"MEGA upload: {result.summary()}")
+        return result
 
     def download_directory(self, remote_directory: str, local_directory: str, check_type: str = "DIR") -> SyncResult:
         self.connect()
         start = time.time()
         os.makedirs(local_directory, exist_ok=True)
-
         if check_type.upper() == "LOG":
             log_result = self._download_log_only(remote_directory, local_directory, start)
             if self._process_gdpr_enabled():
-                gdpr_result = self._download_gdpr_data(remote_directory, local_directory)
-                return self._merge_results(log_result, gdpr_result)
+                return self._merge_results(log_result, self._download_gdpr_data(remote_directory, local_directory))
             return log_result
 
-        remote_spec = self._remote_prefix(remote_directory)
-        proc = self._run(
-            [
-                "copy",
-                remote_spec,
-                local_directory,
-                "--size-only",
-                "--transfers",
-                "2",
-                "--checkers",
-                "4",
-                "--low-level-retries",
-                "20",
-                "--retries",
-                "10",
-                "--progress",
+        errors: List[str] = []
+        downloaded = skipped = failed = 0
+        bytes_transferred = 0
+        prefix = self._norm_rel(remote_directory)
+
+        try:
+            manifest = self._load_remote_manifest(remote_directory)
+            remote_entries = self.list_files(remote_directory)
+            duplicate_paths = {}
+            for info in remote_entries:
+                key = self._norm_rel(info.remote_path)
+                duplicate_paths[key] = duplicate_paths.get(key, 0) + 1
+            duplicate_errors = [
+                f"MEGA contains {count} copies of {path}; refusing ambiguous restore."
+                for path, count in duplicate_paths.items() if count > 1
             ]
+            if duplicate_errors:
+                errors.extend(duplicate_errors[:20])
+                failed += len(duplicate_errors)
+            for info in sorted(remote_entries, key=lambda i: self._norm_rel(i.remote_path)):
+                if duplicate_paths.get(self._norm_rel(info.remote_path), 0) > 1:
+                    continue
+                rel = self._norm_rel(info.remote_path)
+                if prefix and rel.startswith(prefix + "/"):
+                    rel = rel[len(prefix) + 1:]
+                if rel in {self.CANONICAL_LOG_NAME, self.LEGACY_LOG_NAME, self.MANIFEST_NAME} or rel.startswith(self.STAGING_DIR + "/"):
+                    continue
+                local_path = os.path.join(local_directory, rel)
+                recorded = manifest.get(rel)
+                if os.path.exists(local_path) and isinstance(recorded, dict):
+                    try:
+                        if (
+                            recorded.get("hash") == compute_file_hash(local_path)
+                            and int(recorded.get("size") or -1) == os.path.getsize(local_path)
+                        ):
+                            skipped += 1
+                            continue
+                    except OSError:
+                        pass
+                try:
+                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                    self.download_file(info.remote_path, local_path)
+                    downloaded += 1
+                    bytes_transferred += os.path.getsize(local_path)
+                except Exception as exc:
+                    failed += 1
+                    errors.append(f"{info.remote_path}: {exc}")
+
+            # Commit local log last, so a failed restore never makes the local archive look complete.
+            if not errors:
+                log_result = self._download_log_only(remote_directory, local_directory, time.time())
+                downloaded += log_result.downloaded
+                failed += log_result.failed
+                bytes_transferred += log_result.bytes_transferred
+                errors.extend(log_result.errors)
+
+        except Exception as exc:
+            failed += 1
+            errors.append(str(exc))
+
+        result = self._result(
+            start,
+            downloaded=downloaded,
+            skipped=skipped,
+            failed=failed,
+            bytes_transferred=bytes_transferred,
+            errors=errors,
         )
-
-        if proc.returncode != 0:
-            stderr = proc.stderr.strip() or proc.stdout.strip() or "MEGA download failed"
-            if "not found" in stderr.lower() or "does not exist" in stderr.lower():
-                return self._sync_result(start=start)
-            return self._sync_result(failed=1, start=start, errors=[stderr])
-
-        return self._sync_result(downloaded=1, start=start)
+        print(f"MEGA download: {result.summary()}")
+        return result
 
     def _merge_results(self, a: SyncResult, b: SyncResult) -> SyncResult:
         return SyncResult(
@@ -397,9 +555,6 @@ class MegaStorageProvider(StorageProviderProtocol):
             errors=[*a.errors, *b.errors],
         )
 
-    # ------------------------------------------------------------------
-    # Convenience methods for compatibility with migration utilities
-    # ------------------------------------------------------------------
     def __repr__(self) -> str:
         return f"MegaStorageProvider(remote={self._mega_remote!r})"
 
