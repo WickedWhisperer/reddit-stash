@@ -442,9 +442,15 @@ class MegaStorageProvider(StorageProviderProtocol):
                     uploaded += 1
                     bytes_transferred += transferred
 
-                legacy_existing = len(remote_by_path.get(
-                    f"{remote_prefix}/{self.LEGACY_LOG_NAME}" if remote_prefix else self.LEGACY_LOG_NAME}" if remote_prefix else self.LEGACY_LOG_NAME, []
-                ))
+                legacy_existing = len(
+                    remote_by_path.get(
+                        f"{remote_prefix}/{self.LEGACY_LOG_NAME}"
+                        if remote_prefix
+                        else self.LEGACY_LOG_NAME,
+                        [],
+                    )
+                )
+
                 self._delete_known_matches(remote_directory, self.LEGACY_LOG_NAME, legacy_existing)
                 self._run(["rmdirs", f"{self._remote_prefix(remote_directory)}/{self.STAGING_DIR}"], check=False)
 
@@ -560,3 +566,4 @@ class MegaStorageProvider(StorageProviderProtocol):
 
 
 __all__ = ["MegaStorageProvider"]
+                 
